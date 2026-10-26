@@ -48,6 +48,10 @@ Because of these, every metric anchors on the order's `created_at` and on `statu
 8. **customers_by_traffic_source.**
    - Rule: count distinct customers (definition 3) with at least one order created in the date range, using `orders.created_at`, any order status. Traffic source is the user's registration attribute, `users.traffic_source`. The output column is named customers, never users.
    - Reason: not all registered users place an order. A cancelled order is still an order, so it still makes someone a customer. Traffic source belongs to the user, not to the order.
+10. **average_order_value.**
+   - Rule: revenue as in decision 6 (final and pending together) divided by the number of orders that contribute to it, meaning orders whose items are not Cancelled or Returned. An order's value is the sum of its items' sale prices. Orders are dated by their `created_at` (definition 9) and grouped by month or quarter.
+   - Reason: it is the same rule as revenue, so a period's average order value times its order count equals that period's revenue. An order and its items always share a status, so an order is either fully counted or fully left out.
+   - Note: pending orders are included and can still be cancelled or returned, so the newest periods carry the same caveat as pending revenue.
 
 ## Notes for the README
 

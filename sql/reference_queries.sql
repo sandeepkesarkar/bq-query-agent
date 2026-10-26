@@ -5,7 +5,8 @@
 -- table referenced here (see sql/results/reference_queries.md).
 -- Note: order volume ramps sharply from Oct 14, 2026, so the newest month is not comparable
 -- with earlier ones (METRICS.md, known anomalies). Eval windows end no later than Sep 30.
--- Function 4 (average_order_value) has no reference SQL yet.
+-- Query 4 (average_order_value) ran clean: its revenue matches query 1 (final plus pending) for
+-- all 12 months, and its order count (37,514) matches query 3's Shipped, Complete and Processing.
 -- Definitions come from METRICS.md. If a query and METRICS.md disagree, METRICS.md wins.
 --
 -- Dates are derived from the data, nothing is hard-coded:
@@ -81,6 +82,39 @@ WHERE DATE(o.created_at) >= d.start_date
 GROUP BY o.status
 ORDER BY orders DESC;
 -- bytes estimate (dry run, derived dates): 2,275,551 bytes (2.17 MiB)
+
+-- 4. average_order_value (group_by = month)
+-- An order's value is the sum of its items' sale prices. Orders whose items are Cancelled or
+-- Returned are left out, the same rule as revenue (METRICS.md, decision 10). Because of that,
+-- the revenue column here must equal final plus pending revenue from query 1 for each month.
+WITH d AS (
+  SELECT
+    MAX(DATE(created_at)) AS as_of_date,
+    DATE_TRUNC(DATE_SUB(MAX(DATE(created_at)), INTERVAL 11 MONTH), MONTH) AS start_date
+  FROM `bigquery-public-data.thelook_ecommerce.orders`
+),
+order_totals AS (
+  SELECT
+    o.order_id,
+    DATE(o.created_at) AS order_date,
+    SUM(oi.sale_price) AS order_value
+  FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+  JOIN `bigquery-public-data.thelook_ecommerce.orders` AS o ON oi.order_id = o.order_id
+  WHERE oi.status NOT IN ('Cancelled', 'Returned')
+  GROUP BY o.order_id, order_date
+)
+SELECT
+  DATE_TRUNC(t.order_date, MONTH) AS period,
+  COUNT(*) AS orders,
+  SUM(t.order_value) AS revenue,
+  SAFE_DIVIDE(SUM(t.order_value), COUNT(*)) AS average_order_value
+FROM order_totals AS t
+CROSS JOIN d
+WHERE t.order_date >= d.start_date
+  AND t.order_date <= d.as_of_date
+GROUP BY period
+ORDER BY period;
+-- bytes estimate (dry run, derived dates): 6,745,465 bytes (6.43 MiB)
 
 -- 5. return_rate_by_category (items whose 30-day window has closed, cancelled excluded)
 -- The window ends at as_of_date minus 30 days, so every item counted has had its full

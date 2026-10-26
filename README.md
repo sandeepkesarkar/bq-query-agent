@@ -27,7 +27,7 @@ This is a work in progress. The foundation is built and the agent itself is not 
 |---|---|
 | Design of the whole agent (`DESIGN.md`) | The six query functions as tested code |
 | Metric definitions checked against the real data (`METRICS.md`) | The agent graph (route, plan, approve, run, summarize) |
-| Reference SQL for five of the six functions, run against BigQuery and checked | Reference SQL for `average_order_value` |
+| Reference SQL for all six functions, run against BigQuery and checked | The dataset config file (tables, allowed values, the query menu) |
 | A script that runs queries under a 250 MiB per-query cap and writes a report | The model interface, approval step and audit log |
 | Data-quality checks and their results (`sql/`) | The question set and the evaluation results |
 | Notes on what went wrong and what was learned (`LESSONS.md`) | Terraform for the cloud setup |
@@ -107,6 +107,7 @@ Every number the agent reports depends on a definition, and these are written do
 7. The return rate is returned items divided by non-cancelled items whose 30-day window has closed.
 8. Customers by traffic source counts distinct customers with at least one order in the date range, grouped by the traffic source stored on the user's record. A cancelled order still counts.
 9. Every sale is dated by its order's creation time, and the "as of" date is the newest order. The evaluation questions use fixed dates that end on or before September 30, 2026.
+10. Average order value is revenue (as in item 6) divided by the number of orders that contribute to it, so cancelled and returned orders are left out.
 
 The synthetic data has quirks, found by checking it, and they are listed in `METRICS.md`. The main ones:
 
@@ -155,7 +156,7 @@ What the files do, in more detail:
 | `LESSONS.md` | A running list of mistakes, surprises and decisions, each with what was done about it. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
-| `sql/reference_queries.sql` | One query for each function that has reference SQL: revenue by period, top products, order status breakdown, return rate by category, and customers by traffic source. Dates are derived from the data. |
+| `sql/reference_queries.sql` | One query for each of the six functions: revenue by period, top products, order status breakdown, average order value, return rate by category, and customers by traffic source. Dates are derived from the data. |
 | `sql/metrics_checks.sql` | Eight checks: table sizes, whether order and item statuses agree, timestamp problems, customers by traffic source, the date range, order versus item timestamps, monthly volume and daily volume. |
 | `sql/results/*.md` | The output of the two scripts above, kept so the evidence can be read without re-running anything. |
 

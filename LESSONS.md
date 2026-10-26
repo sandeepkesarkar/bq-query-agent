@@ -42,9 +42,12 @@ With no Python version pinned, `uv` picked a release too new for one dependency'
 
 The newest month looked about twice as busy as the months before it. Dating every sale by its order did not change that, so the next check split it by order count, order size and day. Items per order, average sale price and the share cancelled or returned are flat across 14 months, so the jump is more orders, not different orders. Daily volume sits at about 200 through October 13 and then climbs, steeply from the 20th: 573 on the 22nd, 1,771 on the 25th. Over half of October's orders were created in the last six days of the data. The cause is not established. Whatever it is, the newest weeks do not represent the rest, so eval questions pin windows that end on or before September 30, 2026, and any answer about the current month carries that caveat.
 
+## 11. Define metrics so they can check each other
+
+Average order value was defined with the same rule as revenue, which gave two free tests with no extra queries. Its revenue column matches the sum of final and pending revenue from the revenue query for all 12 months, to the cent. Its order count (37,514) matches the Shipped, Complete and Processing orders from the status breakdown. Neither check proves the definition is the right one, but a query that disagrees with its siblings is wrong somewhere, and these checks catch that.
+
 ## Still open
 
 - The cause of the order-volume ramp since October 14 is not established. A data-generator artifact is the likeliest guess, but nothing here tests that.
 - The return-window figures in lesson 4 were measured from the item's `created_at` and have not been repeated on the order clock. The 30-day window leaves a wide margin either way.
-- `average_order_value` has no reference SQL yet.
 - No real query over the cap has been run through the cost check.
