@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+# credentials and cloud state: never commit
+service-account*.json
+credentials*.json
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+# local audit log
+audit.jsonl
