@@ -4,9 +4,9 @@
 # menu, each function's parameters and its SQL. The graph, the guardrails and the audit log
 # read it through a generic loader and never name a table, column or function themselves.
 #
-# STATUS (Oct 26, 2026): drafted. No code loads it yet, and the SQL has not been run as a
-# template. The first test is that every function, called with default parameters, returns
-# what sql/reference_queries.sql returns. METRICS.md is the authority on what each number means.
+# STATUS (Oct 27, 2026): loaded by src/functions/catalog.py. Every function, called with
+# default parameters, returns what sql/reference_queries.sql returns
+# (tests/test_reference_match.py). METRICS.md is the authority on what each number means.
 # The category list comes from check 9 in sql/metrics_checks.sql, not from memory.
 #
 # Template rules:
@@ -34,12 +34,11 @@ tables:
 constants:
   final_window_days: 30     # METRICS.md, decision 6
   window_months_back: 11    # default window = this many months back, plus the current month
-  max_rows: 100
+  max_rows: 100             # every query ends in LIMIT {max_rows}
 
 limits:
   max_bytes_per_query: 262144000   # 250 MiB. Checked on the dry run and again as maximum_bytes_billed.
-  max_rows: 100
-  date_min: 2019-01-15             # first item in the data, checked Oct 26, 2026
+  date_min: 2019-01-01             # before the first order; the data is regenerated (LESSONS.md 13)
   date_max: today_utc              # a date after today is rejected
 
 enums:

@@ -12,3 +12,5 @@ credentials*.json
 *.tfvars
 # local audit log
 audit.jsonl
+# editor swap files
+*.swp
