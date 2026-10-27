@@ -45,6 +45,8 @@ Stretch (only if everything else is done): `inventory_aging(days_threshold)`, `p
 
 State fields: question, route (answer | clarify | refuse), plan (function name and params), validation_errors, estimated_bytes, approved, result_rows, summary, audit_id.
 
+As built, the state also carries route_reason, attempts (plans made), result_columns, bytes_processed, bytes_billed, status (answered, clarify, refused, rejected, over_cap, declined, error), error and message (what the person is shown). The audit record needs these fields.
+
 Nodes:
 1. route (model): classify as answer, clarify or refuse. Out-of-scope and adversarial questions end here.
 2. plan (model): emit a JSON plan validated against a typed schema. Unknown function name means reject.
@@ -102,7 +104,7 @@ bq-query-agent/
   README.md
   DESIGN.md
   config/thelook.yaml
-  src/agent/{graph.py, nodes.py, models.py, audit.py}
+  src/agent/{graph.py, models.py, audit.py}   (the nodes live in graph.py)
   src/functions/{catalog.py, queries.py}
   tests/
   eval/{questions.yaml, run_eval.py, results.md}

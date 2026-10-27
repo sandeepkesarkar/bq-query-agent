@@ -21,22 +21,28 @@ The data is the public BigQuery dataset `thelook_ecommerce`, a synthetic online 
 
 ## Status
 
-This is a work in progress. The foundation is built and the agent itself is not yet.
+This is a work in progress. The agent runs end to end, with a person approving each query, but a keyword stub stands in for the AI model. No real model is connected yet.
 
 | Built and in this repo | Not built yet |
 |---|---|
-| Design of the whole agent (`DESIGN.md`) | The six query functions as tested code |
-| Metric definitions checked against the real data (`METRICS.md`) | The agent graph (route, plan, approve, run, summarize) |
-| Reference SQL for all six functions, run against BigQuery and checked | A loader that reads the config file |
-| A script that runs queries under a 250 MiB per-query cap and writes a report | The model interface, approval step and audit log |
-| Data-quality checks and their results (`sql/`) | The question set and the evaluation results |
-| Notes on what went wrong and what was learned (`LESSONS.md`) | Terraform for the cloud setup |
-| Python project setup with pinned versions | Tests |
-| The dataset config: tables, limits and the query menu with each function's parameters and SQL (drafted; no code reads it yet) | |
+| Design of the whole agent (`DESIGN.md`) | A real AI model behind the model interface (a keyword stub is used today) |
+| Metric definitions checked against the real data (`METRICS.md`) | The question set and the evaluation results |
+| Reference SQL for all six functions, run against BigQuery and checked | A read-only service account |
+| The dataset config: tables, limits and the query menu with each function's parameters and SQL | A durable checkpointer (state is kept in memory) |
+| The six query functions as code (`src/functions/`): a loader that reads the config and fills its templates, and a runner that validates parameters, binds them as typed query parameters, dry-runs, refuses anything over 250 MiB and sets the same cap on the job | Terraform for the cloud setup |
+| The agent graph (`src/agent/`): route, plan, validate, cost check, approval (a LangGraph `interrupt()`), execute, summarize and audit, with one re-plan after a rejected plan | |
+| A model interface, `complete_structured(prompt, schema)`, and a keyword stub that implements it | |
+| An audit log: one JSON line per request in `audit.jsonl`, including refused, rejected, over-cap and declined ones | |
+| A command-line demo (`scripts/ask.py`) that asks for approval before running a query | |
+| Tests (`tests/`): config checks, validation, binding, both caps and every path through the graph with a stub BigQuery client; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries | |
+| A script that runs queries under a 250 MiB per-query cap and writes a report | |
+| Data-quality checks and their results (`sql/`) | |
+| Notes on what went wrong and what was learned (`LESSONS.md`) | |
+| Python project setup with pinned versions | |
 
-## How it will work
+## How it works
 
-This diagram shows the design. Blue steps use an AI model, grey steps are plain code, and the orange step is a person.
+This diagram shows the graph in `src/agent/graph.py`. Blue steps use an AI model (today a keyword stub), grey steps are plain code, and the orange step is a person.
 
 ```mermaid
 flowchart TD
@@ -79,19 +85,93 @@ flowchart TD
 
 Only steps 1, 2 and 7 use the AI. Everything that decides whether something is allowed, affordable or safe is ordinary code that can be read, tested and trusted to behave the same way every time.
 
-### The safety rules (design)
+### The same flow over time
 
-| Rule | What it prevents |
-|---|---|
-| Only functions on the menu can run | The AI inventing its own query |
-| Every value is passed as a bound parameter | Text from a question being turned into SQL |
-| Dates, counts and choices are checked against limits | Nonsense or oversized requests |
-| A dry run estimates the data scanned before anything runs | A query that reads far more data than intended |
-| A hard cap of 250 MiB per query, checked twice | A runaway query: once before approval, and again as a limit on the job itself |
-| A person approves every query | Anything running without a human having seen it |
-| Read-only access | Any change to the data |
-| Results are aggregates only | Returning rows about an individual customer |
-| An audit record for every request | Not knowing afterwards what ran and why |
+The flowchart shows the steps. This diagram shows who talks to whom, in order, including every place a request can stop.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Person
+    participant G as Graph (LangGraph)
+    participant M as AI model (keyword stub today)
+    participant C as Catalog and checks
+    participant B as BigQuery
+    participant L as Audit log
+
+    P->>G: Question in plain English
+    G->>M: Route: answer, ask a follow-up, or refuse? (menu descriptions included)
+    M-->>G: Route decision
+
+    alt Follow-up needed, or out of scope
+        G->>L: Record the request and the reason
+        G-->>P: A follow-up question, or a refusal
+    else Answerable from the menu
+        G->>M: Plan: pick one function and fill in its parameters
+        M-->>G: Plan as JSON: function name and parameters
+
+        G->>C: Validate the function and every parameter
+        opt Plan rejected (first time only)
+            C-->>G: Every problem found
+            G->>M: Re-plan, with the problems listed
+            M-->>G: New plan
+            G->>C: Validate again
+        end
+
+        alt Not allowed, even after one re-plan
+            C-->>G: Every problem found
+            G->>L: Record the rejected plan
+            G-->>P: No allowed query could be formed
+        else Allowed
+            C-->>G: Checked values and the rendered SQL
+            G->>B: Dry run: same SQL, typed parameters, nothing runs
+            B-->>G: Estimated bytes
+
+            alt Estimate over 250 MiB
+                G->>L: Record the refusal
+                G-->>P: Stopped. No approval is offered
+            else Within the cap
+                G->>P: Pause (interrupt): function, parameters, estimated bytes
+                Note over G: State is saved by the checkpointer. On resume the<br/>pausing step starts again from its top, so it has<br/>no side effects before the pause.
+                P-->>G: Resume with approve or decline
+
+                alt Declined
+                    G->>L: Record the decline
+                    G-->>P: Stopped
+                else Approved
+                    G->>B: Run the query, with maximum_bytes_billed = 250 MiB
+                    alt BigQuery stops the job (bill would pass the cap)
+                        B-->>G: bytesBilledLimitExceeded (reported as HTTP 500)
+                        G->>L: Record the error
+                        G-->>P: Stopped. Retrying would fail the same way
+                    else Rows returned
+                        B-->>G: Rows, bytes processed, bytes billed
+                        G->>M: Summarize the rows
+                        M-->>G: Short answer
+                        G->>L: Record function, parameters, estimated and billed bytes, row count, model
+                        G-->>P: The answer, with the function and parameters used
+                    end
+                end
+            end
+        end
+    end
+```
+
+All of this is built and tested, with a keyword stub in place of the AI model. Every request ends in the audit log, whether it was answered or stopped. The one exception is a request paused at approval and never resumed: it has not ended, so it has no audit line.
+
+### The safety rules
+
+| Rule | What it prevents | Status |
+|---|---|---|
+| Only functions on the menu can run | The AI inventing its own query | Built and tested (`src/functions/queries.py`) |
+| Every value is passed as a typed bound parameter | Text from a question being turned into SQL | Built and tested |
+| Dates, counts and choices are checked against limits | Nonsense or oversized requests | Built and tested |
+| A dry run estimates the data scanned before anything runs | A query that reads far more data than intended | Built and tested |
+| A hard cap of 250 MiB per query, checked twice | A runaway query: once on the dry-run estimate, and again as `maximum_bytes_billed` on the job itself | Built and tested on real jobs with a lowered cap |
+| A person approves every query | Anything running without a human having seen it | Built and tested (`src/agent/graph.py`). Only `True` or `{"approved": true}` approves; any other answer declines |
+| Read-only access | Any change to the data | Not built. Queries run as whoever is logged in to `gcloud`. The dataset itself is public and read-only. |
+| Results are aggregates only | Returning rows about an individual customer | In the SQL of all six functions; there is no separate check |
+| An audit record for every request | Not knowing afterwards what ran and why | Built and tested: one JSON line per request in `audit.jsonl` (`src/agent/audit.py`) |
 
 ## The data
 
@@ -110,12 +190,56 @@ Every number the agent reports depends on a definition, and these are written do
 9. Every sale is dated by its order's creation time, and the "as of" date is the newest order. The evaluation questions use fixed dates that end on or before September 30, 2026.
 10. Average order value is revenue (as in item 6) divided by the number of orders that contribute to it, so cancelled and returned orders are left out.
 
-The synthetic data has quirks, found by checking it, and they are listed in `METRICS.md`. The main ones:
+The synthetic data has quirks, found by checking it, and they are listed in `METRICS.md`. The main ones, as counted on October 26, 2026:
 
 - An item's timestamp differs from its order's timestamp for almost every item, by up to four days. That is why sales are dated by the order.
 - 1,291 items are dated after the time of the check.
 - 668 returns happened before the item was created, and 35,912 items shipped before they were created.
 - Order volume ramps sharply from October 14, 2026, so the newest weeks do not look like the rest. The cause is not established.
+
+The public dataset is regenerated, not just extended. By October 27 every month's order count had changed, so the exact figures above and in `METRICS.md` describe one snapshot. Evaluation answers therefore cannot be stored once as fixed numbers (`LESSONS.md`, lesson 13).
+
+## Asking the agent
+
+```
+uv run python scripts/ask.py "top 5 products by profit in Jeans from 2026-01-01 to 2026-09-30"
+```
+
+The demo routes and plans the question with the keyword stub, validates the plan, and dry-runs it. It then shows the function, the parameters and the estimated bytes, and asks `Run this query? [y/N]`. Only `y` runs the query. Then it prints a short answer with the function, parameters and bytes used, and appends one line to `audit.jsonl`. Use `--audit <path>` to write the log somewhere else.
+
+The keyword stub matches words such as "top", "revenue", "return rate" and "traffic source", picks up a category, "by quarter", "top N" and ISO dates, and refuses questions that mention SQL, personal data or instructions. It exists to drive the graph and its tests. It is not a language model, and it misreads anything phrased differently.
+
+## Using the query functions
+
+The six functions can be called from Python today, without the agent. A call is checked, dry-run and capped before it runs:
+
+```python
+from functions import run
+
+result = run("top_products", {"metric": "profit", "n": 5, "category": "Jeans",
+                              "start_date": "2026-01-01", "end_date": "2026-09-30"})
+result.columns          # ['product_id', 'product_name', 'category', 'revenue', 'units', 'profit']
+result.rows             # one tuple per row
+result.estimated_bytes, result.processed_bytes, result.billed_bytes
+```
+
+Parameters that are left out take their defaults. Dates fall back to the 12 calendar months ending at the newest order. A call can fail in three ways, and nothing runs in the first two:
+
+- `ValidationError`: the function, a parameter name or a value is not allowed. Its `errors` list holds every problem found.
+- `OverCapError`: the dry-run estimate is over 250 MiB.
+- `BilledLimitError`: BigQuery stopped the job at `maximum_bytes_billed`.
+
+`run()` is `prepare()`, `estimate()` and `execute()` in one call. The agent calls them separately, so a person can approve between the estimate and the run:
+
+```python
+from functions import estimate, execute, load, prepare
+
+prepared = prepare(load(), "revenue_by_period", {"group_by": "quarter"})
+estimated = estimate(prepared)       # dry run; raises OverCapError over the cap
+result = execute(prepared, estimated_bytes=estimated)
+```
+
+The project is not installed as a package, so put `src` on the path when running a script: `PYTHONPATH=src uv run python your_script.py`. The tests set this up themselves.
 
 ## Project structure
 
@@ -135,12 +259,25 @@ bq-query-agent/
 ├── config/
 │   └── thelook.yaml           dataset settings: tables, limits, and the query menu with each function's parameters and SQL
 ├── src/
-│   ├── agent/                 planned: the agent graph, its steps, model interface and audit log
-│   └── functions/             planned: the six query functions
-├── tests/                     planned: tests for the functions and the guardrails
+│   ├── agent/
+│   │   ├── __init__.py        the public names: build_graph and the model classes
+│   │   ├── graph.py           the graph: its state, its eight nodes and the edges between them
+│   │   ├── models.py          the model interface, the output schemas and the keyword stub
+│   │   └── audit.py           appends one JSON line per request to the audit log
+│   └── functions/
+│       ├── __init__.py        the public names: run, prepare, estimate, execute, load and the error types
+│       ├── catalog.py         loads the config and fills each function's SQL template
+│       └── queries.py         validates a call, binds its parameters, dry-runs, caps and runs it
+├── tests/
+│   ├── test_catalog.py        the loader and the config checks (no cloud access)
+│   ├── test_queries.py        validation, binding and both caps, with a stub client (no cloud access)
+│   ├── test_agent.py          every path through the graph, with a stub client (no cloud access)
+│   ├── stubs.py               a stand-in BigQuery client for the tests above
+│   └── test_reference_match.py  each function against its reference SQL, and both caps on real jobs
 ├── eval/                      planned: the hand-written question set and its results
 ├── infra/                     planned: Terraform for the cloud setup
 ├── scripts/
+│   ├── ask.py                 command-line demo: ask one question, approve or decline, see the answer
 │   ├── dry_run_queries.py     asks BigQuery how much data each reference query would read
 │   └── run_queries.py         runs queries under the 250 MiB cap and writes a report
 └── sql/
@@ -156,7 +293,14 @@ What the files do, in more detail:
 | `DESIGN.md` | The plan for the whole agent. Covers what it will and will not do, the list of query functions, each step of the graph, the safety rules, the audit record, and how it will be evaluated. |
 | `METRICS.md` | The single source of truth for what a number means. If a query and this file disagree, this file wins. Also holds the facts verified against the data and the list of known anomalies. |
 | `LESSONS.md` | A running list of mistakes, surprises and decisions, each with what was done about it. |
-| `config/thelook.yaml` | The one file that holds everything specific to this dataset: table names, the 250 MiB cap, allowed values such as the 26 product categories, and for each of the six functions its description, parameters, bounds and SQL template. Drafted and checked for consistency; no code loads it yet. |
+| `config/thelook.yaml` | The one file that holds everything specific to this dataset: table names, the 250 MiB cap, allowed values such as the 26 product categories, and for each of the six functions its description, parameters, bounds and SQL template. Read by `src/functions/catalog.py`, which checks it for consistency when it loads. |
+| `src/functions/catalog.py` | Reads the config and fills each `{placeholder}` in a function's SQL from the tables, constants, snippets or the function's own slots. An unknown name is an error, and every template is rendered once at load so a bad one fails early. Values from a question never enter a template. |
+| `src/functions/queries.py` | Checks a call against the catalog (known function and parameters, allowed values, number bounds, date limits, start not after end), binds every value as a typed query parameter (an omitted date or category is a typed NULL), dry-runs, refuses anything over the cap, runs with the cap as `maximum_bytes_billed`, and returns the rows with estimated, processed and billed bytes. |
+| `src/agent/graph.py` | Builds the LangGraph graph. Route, plan and summarize call the model; validate, cost check, approval, execute and audit are code. A rejected plan gets one re-plan with the errors listed. Approval pauses with `interrupt()` and resumes with `Command(resume=...)`, using the in-memory checkpointer. The approval node does nothing before the pause, because LangGraph runs it again from the top on resume. |
+| `src/agent/models.py` | The interface a model must meet, `complete_structured(prompt, schema)`, the three output schemas (route, plan, summary), and the keyword stub. The graph checks whatever comes back: an unknown route counts as a refusal, and a plan goes through validation. |
+| `src/agent/audit.py` | Writes one JSON line per request: time, question, route, status, function, parameters, estimated, processed and billed bytes, approval, row count, error and model name. |
+| `scripts/ask.py` | The command-line demo described under "Asking the agent". |
+| `tests/` | `test_catalog.py`, `test_queries.py` and `test_agent.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
 | `sql/reference_queries.sql` | One query for each of the six functions: revenue by period, top products, order status breakdown, average order value, return rate by category, and customers by traffic source. Dates are derived from the data. |
@@ -174,9 +318,12 @@ uv sync
 uv run python scripts/dry_run_queries.py
 uv run python scripts/run_queries.py
 uv run python scripts/run_queries.py --file sql/reference_queries.sql
+uv run pytest -m "not integration"
+uv run pytest
+uv run python scripts/ask.py "revenue by quarter"
 ```
 
-`uv sync` installs Python 3.12 and the dependencies. The first script runs nothing and only estimates the data scanned. The other two run real queries against the public dataset, and your project pays for them. Each query here scans under 25 MiB, and BigQuery's free tier covers the first 1 TiB each month. Nothing in the repo contains credentials, and the ignore file keeps it that way.
+`uv sync` installs Python 3.12 and the dependencies. The first script runs nothing and only estimates the data scanned. The other two scripts run real queries against the public dataset, and your project pays for them. The first `pytest` line needs no cloud access. The second also runs the integration tests, which send about 40 queries to BigQuery. Each query here scans under 25 MiB, and BigQuery's free tier covers the first 1 TiB each month. Nothing in the repo contains credentials, and the ignore file keeps it that way.
 
 ## Terms used
 
@@ -185,6 +332,8 @@ uv run python scripts/run_queries.py --file sql/reference_queries.sql
 - **Bound parameter.** A value passed separately from the query text, so it can never be read as part of the query.
 - **LangGraph.** A framework for building AI workflows as a graph of steps, including a pause where a person can approve.
 - **Audit log.** A record of every request and what happened to it.
+- **Interrupt.** A LangGraph pause. The graph saves its state and waits, and it carries on when it is resumed with an answer.
+- **Checkpointer.** Where LangGraph keeps a paused graph's state. Here it is in memory, so a paused request is lost if the process stops.
 
 ## License
 
