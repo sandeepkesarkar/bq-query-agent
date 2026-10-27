@@ -46,6 +46,10 @@ The newest month looked about twice as busy as the months before it. Dating ever
 
 Average order value was defined with the same rule as revenue, which gave two free tests with no extra queries. Its revenue column matches the sum of final and pending revenue from the revenue query for all 12 months, to the cent. Its order count (37,514) matches the Shipped, Complete and Processing orders from the status breakdown. Neither check proves the definition is the right one, but a query that disagrees with its siblings is wrong somewhere, and these checks catch that.
 
+## 12. Break ties on purpose
+
+The top-products query ranked by revenue with no tie-break, and four products tied at 2,709.00 around places 8 to 10. A re-run after adding `ORDER BY revenue DESC, product_id` returned a different set for those places: one product dropped out and another came in. The first answer had never been wrong, only arbitrary, and an eval that scores against an arbitrary reference fails for no reason. Every ranking now breaks ties by id.
+
 ## Still open
 
 - The cause of the order-volume ramp since October 14 is not established. A data-generator artifact is the likeliest guess, but nothing here tests that.

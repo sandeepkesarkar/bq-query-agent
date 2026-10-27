@@ -84,3 +84,9 @@ JOIN `bigquery-public-data.thelook_ecommerce.orders` AS o ON oi.order_id = o.ord
 WHERE DATE(o.created_at) >= DATE '2026-09-15'
 GROUP BY day
 ORDER BY day;
+
+-- 9. distinct_categories
+SELECT category, COUNT(*) AS products
+FROM `bigquery-public-data.thelook_ecommerce.products`
+GROUP BY category
+ORDER BY category;

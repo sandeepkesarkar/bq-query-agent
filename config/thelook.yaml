@@ -1,0 +1,282 @@
+# Dataset config for bq-query-agent: bigquery-public-data.thelook_ecommerce.
+#
+# Everything specific to this dataset lives in this file: table names, constants, the query
+# menu, each function's parameters and its SQL. The graph, the guardrails and the audit log
+# read it through a generic loader and never name a table, column or function themselves.
+#
+# STATUS (Oct 26, 2026): drafted. No code loads it yet, and the SQL has not been run as a
+# template. The first test is that every function, called with default parameters, returns
+# what sql/reference_queries.sql returns. METRICS.md is the authority on what each number means.
+# The category list comes from check 9 in sql/metrics_checks.sql, not from memory.
+#
+# Template rules:
+# - {name} is replaced by the loader from `tables`, `constants`, `snippets` or the function's
+#   own `slots`, by looking up known keys. Never use str.format, and never put anything from a
+#   user's question into a template.
+# - @name is a BigQuery bound parameter. Values that come from a question reach the query only
+#   this way, or by choosing a value from an allowed list that selects a slot.
+# - A date parameter left empty falls back to the default window: the 12 calendar months that
+#   end at the newest order (METRICS.md, definition 9).
+
+dataset:
+  id: thelook_ecommerce
+  project: bigquery-public-data
+  location: US
+  description: A synthetic online clothing store with orders, items, products and users.
+
+tables:
+  orders: "`bigquery-public-data.thelook_ecommerce.orders`"
+  order_items: "`bigquery-public-data.thelook_ecommerce.order_items`"
+  inventory_items: "`bigquery-public-data.thelook_ecommerce.inventory_items`"
+  products: "`bigquery-public-data.thelook_ecommerce.products`"
+  users: "`bigquery-public-data.thelook_ecommerce.users`"
+
+constants:
+  final_window_days: 30     # METRICS.md, decision 6
+  window_months_back: 11    # default window = this many months back, plus the current month
+  max_rows: 100
+
+limits:
+  max_bytes_per_query: 262144000   # 250 MiB. Checked on the dry run and again as maximum_bytes_billed.
+  max_rows: 100
+  date_min: 2019-01-15             # first item in the data, checked Oct 26, 2026
+  date_max: today_utc              # a date after today is rejected
+
+enums:
+  # From check 9 (sql/metrics_checks.sql, query 9), run Oct 27, 2026 UTC. 26 categories.
+  category:
+    - "Accessories"
+    - "Active"
+    - "Blazers & Jackets"
+    - "Clothing Sets"
+    - "Dresses"
+    - "Fashion Hoodies & Sweatshirts"
+    - "Intimates"
+    - "Jeans"
+    - "Jumpsuits & Rompers"
+    - "Leggings"
+    - "Maternity"
+    - "Outerwear & Coats"
+    - "Pants"
+    - "Pants & Capris"
+    - "Plus"
+    - "Shorts"
+    - "Skirts"
+    - "Sleep & Lounge"
+    - "Socks"
+    - "Socks & Hosiery"
+    - "Suits"
+    - "Suits & Sport Coats"
+    - "Sweaters"
+    - "Swim"
+    - "Tops & Tees"
+    - "Underwear"
+
+snippets:
+  window_cte: |
+    d AS (
+      SELECT
+        MAX(DATE(created_at)) AS as_of_date,
+        DATE_TRUNC(DATE_SUB(MAX(DATE(created_at)), INTERVAL {window_months_back} MONTH), MONTH) AS start_date
+      FROM {orders}
+    )
+
+functions:
+
+  revenue_by_period:
+    description: >
+      Revenue per month, quarter or year, split into final revenue (orders at least 30 days
+      old) and pending revenue (newer orders, which can still be cancelled or returned).
+      Cancelled and returned items are never counted.
+    not_for: >
+      Revenue of cancelled or returned items, revenue by product or category, forecasts.
+    params:
+      group_by: {type: enum, values: [month, quarter, year], default: month}
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+    slots:
+      period_expr:
+        by: group_by
+        values:
+          month: "DATE_TRUNC(DATE(o.created_at), MONTH)"
+          quarter: "DATE_TRUNC(DATE(o.created_at), QUARTER)"
+          year: "DATE_TRUNC(DATE(o.created_at), YEAR)"
+    output_columns: [period, final_revenue, pending_revenue]
+    sql: |
+      WITH {window_cte}
+      SELECT
+        {period_expr} AS period,
+        SUM(IF(DATE(o.created_at) <= DATE_SUB(d.as_of_date, INTERVAL {final_window_days} DAY), oi.sale_price, 0)) AS final_revenue,
+        SUM(IF(DATE(o.created_at) >  DATE_SUB(d.as_of_date, INTERVAL {final_window_days} DAY), oi.sale_price, 0)) AS pending_revenue
+      FROM {order_items} AS oi
+      JOIN {orders} AS o ON oi.order_id = o.order_id
+      CROSS JOIN d
+      WHERE oi.status NOT IN ('Cancelled', 'Returned')
+        AND DATE(o.created_at) >= COALESCE(@start_date, d.start_date)
+        AND DATE(o.created_at) <= COALESCE(@end_date, d.as_of_date)
+      GROUP BY period
+      ORDER BY period
+      LIMIT {max_rows}
+
+  top_products:
+    description: >
+      The best-selling products by revenue, units sold or profit, optionally within one
+      category. Cancelled and returned items are not counted. Ties are broken by product id.
+    not_for: Products by customer, by region, or by time period.
+    params:
+      metric: {type: enum, values: [revenue, units, profit], default: revenue}
+      n: {type: int, min: 1, max: 20, default: 10}
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+      category: {type: enum, values_from: category, optional: true}
+    slots:
+      order_by:
+        by: metric
+        values:
+          revenue: revenue
+          units: units
+          profit: profit
+    output_columns: [product_id, product_name, category, revenue, units, profit]
+    sql: |
+      WITH {window_cte}
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        SUM(oi.sale_price) AS revenue,
+        COUNT(*) AS units,
+        SUM(oi.sale_price - ii.cost) AS profit
+      FROM {order_items} AS oi
+      JOIN {orders} AS o ON oi.order_id = o.order_id
+      JOIN {inventory_items} AS ii ON oi.inventory_item_id = ii.id
+      JOIN {products} AS p ON ii.product_id = p.id
+      CROSS JOIN d
+      WHERE oi.status NOT IN ('Cancelled', 'Returned')
+        AND DATE(o.created_at) >= COALESCE(@start_date, d.start_date)
+        AND DATE(o.created_at) <= COALESCE(@end_date, d.as_of_date)
+        AND (@category IS NULL OR p.category = @category)
+      GROUP BY product_id, product_name, p.category
+      ORDER BY {order_by} DESC, product_id
+      LIMIT @n
+
+  order_status_breakdown:
+    description: >
+      How many orders are in each status (Shipped, Complete, Processing, Cancelled, Returned)
+      over a date range. Counts orders, not items.
+    not_for: Item-level counts, revenue, or the history of one order.
+    params:
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+    output_columns: [status, orders]
+    sql: |
+      WITH {window_cte}
+      SELECT o.status, COUNT(*) AS orders
+      FROM {orders} AS o
+      CROSS JOIN d
+      WHERE DATE(o.created_at) >= COALESCE(@start_date, d.start_date)
+        AND DATE(o.created_at) <= COALESCE(@end_date, d.as_of_date)
+      GROUP BY o.status
+      ORDER BY orders DESC
+      LIMIT {max_rows}
+
+  average_order_value:
+    description: >
+      Average order value per month or quarter: revenue divided by the number of orders that
+      contribute to it. Cancelled and returned orders are left out. Pending orders are included.
+    not_for: Average value per customer, per product, or per item.
+    params:
+      group_by: {type: enum, values: [month, quarter], default: month}
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+    slots:
+      period_expr:
+        by: group_by
+        values:
+          month: "DATE_TRUNC(t.order_date, MONTH)"
+          quarter: "DATE_TRUNC(t.order_date, QUARTER)"
+    output_columns: [period, orders, revenue, average_order_value]
+    sql: |
+      WITH {window_cte},
+      order_totals AS (
+        SELECT
+          o.order_id,
+          DATE(o.created_at) AS order_date,
+          SUM(oi.sale_price) AS order_value
+        FROM {order_items} AS oi
+        JOIN {orders} AS o ON oi.order_id = o.order_id
+        WHERE oi.status NOT IN ('Cancelled', 'Returned')
+        GROUP BY o.order_id, order_date
+      )
+      SELECT
+        {period_expr} AS period,
+        COUNT(*) AS orders,
+        SUM(t.order_value) AS revenue,
+        SAFE_DIVIDE(SUM(t.order_value), COUNT(*)) AS average_order_value
+      FROM order_totals AS t
+      CROSS JOIN d
+      WHERE t.order_date >= COALESCE(@start_date, d.start_date)
+        AND t.order_date <= COALESCE(@end_date, d.as_of_date)
+      GROUP BY period
+      ORDER BY period
+      LIMIT {max_rows}
+
+  return_rate_by_category:
+    description: >
+      The share of items returned, by product category, counting only items whose 30-day return
+      window has closed and excluding cancelled items. The range therefore ends at most 30 days
+      before the newest order, and window_end shows the actual end. Categories with fewer than
+      min_orders orders are left out.
+    not_for: Return rates by customer, by product, or for the most recent 30 days.
+    params:
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+      min_orders: {type: int, min: 1, max: 1000, default: 100}
+    output_columns: [category, returned_items, eligible_items, return_rate, window_end]
+    sql: |
+      WITH {window_cte}
+      SELECT
+        p.category,
+        COUNTIF(oi.status = 'Returned') AS returned_items,
+        COUNT(*) AS eligible_items,
+        SAFE_DIVIDE(COUNTIF(oi.status = 'Returned'), COUNT(*)) AS return_rate,
+        ANY_VALUE(LEAST(COALESCE(@end_date, d.as_of_date), DATE_SUB(d.as_of_date, INTERVAL {final_window_days} DAY))) AS window_end
+      FROM {order_items} AS oi
+      JOIN {orders} AS o ON oi.order_id = o.order_id
+      JOIN {inventory_items} AS ii ON oi.inventory_item_id = ii.id
+      JOIN {products} AS p ON ii.product_id = p.id
+      CROSS JOIN d
+      WHERE oi.status != 'Cancelled'
+        AND DATE(o.created_at) >= COALESCE(@start_date, d.start_date)
+        AND DATE(o.created_at) <= LEAST(COALESCE(@end_date, d.as_of_date), DATE_SUB(d.as_of_date, INTERVAL {final_window_days} DAY))
+      GROUP BY p.category
+      HAVING COUNT(DISTINCT oi.order_id) >= @min_orders
+      ORDER BY return_rate DESC
+      LIMIT {max_rows}
+
+  customers_by_traffic_source:
+    description: >
+      How many customers placed at least one order in the date range, grouped by the traffic
+      source stored on the user (Search, Organic, Facebook, Email, Display). A cancelled order
+      still counts. Counts only, never individual customers.
+    not_for: Registered users who never ordered, revenue by traffic source, named customers.
+    params:
+      start_date: {type: date, default: window_start}
+      end_date: {type: date, default: as_of}
+    output_columns: [traffic_source, customers]
+    sql: |
+      WITH {window_cte}
+      SELECT
+        u.traffic_source,
+        COUNT(DISTINCT o.user_id) AS customers
+      FROM {orders} AS o
+      JOIN {users} AS u ON u.id = o.user_id
+      CROSS JOIN d
+      WHERE DATE(o.created_at) >= COALESCE(@start_date, d.start_date)
+        AND DATE(o.created_at) <= COALESCE(@end_date, d.as_of_date)
+      GROUP BY u.traffic_source
+      ORDER BY customers DESC
+      LIMIT {max_rows}
+
+stretch:   # not part of week one; only if everything else is done
+  - inventory_aging
+  - profit_by_category

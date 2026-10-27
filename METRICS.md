@@ -52,6 +52,9 @@ Because of these, every metric anchors on the order's `created_at` and on `statu
    - Rule: revenue as in decision 6 (final and pending together) divided by the number of orders that contribute to it, meaning orders whose items are not Cancelled or Returned. An order's value is the sum of its items' sale prices. Orders are dated by their `created_at` (definition 9) and grouped by month or quarter.
    - Reason: it is the same rule as revenue, so a period's average order value times its order count equals that period's revenue. An order and its items always share a status, so an order is either fully counted or fully left out.
    - Note: pending orders are included and can still be cancelled or returned, so the newest periods carry the same caveat as pending revenue.
+11. **Ties in rankings.**
+   - Rule: when two rows tie on the ranking value, order them by id, so the same question always returns the same rows.
+   - Reason: three or more products tie at 2,709.00 in revenue for places 8 to 10 of the top products. Without a tie-break the database picks any of them, and two runs of the same query returned different products.
 
 ## Notes for the README
 

@@ -3,6 +3,7 @@
 -- definition 9), then run clean. Queries 3 and 6 matched their earlier results exactly, as
 -- they should. Bytes under each query are dry-run estimates; the billed figure is 10 MiB per
 -- table referenced here (see sql/results/reference_queries.md).
+-- Query 2 breaks ties by product id (METRICS.md, decision 11).
 -- Note: order volume ramps sharply from Oct 14, 2026, so the newest month is not comparable
 -- with earlier ones (METRICS.md, known anomalies). Eval windows end no later than Sep 30.
 -- Query 4 (average_order_value) ran clean: its revenue matches query 1 (final plus pending) for
@@ -63,7 +64,7 @@ WHERE oi.status NOT IN ('Cancelled', 'Returned')
   AND DATE(o.created_at) >= d.start_date
   AND DATE(o.created_at) <= d.as_of_date
 GROUP BY product_id, product_name, p.category
-ORDER BY revenue DESC
+ORDER BY revenue DESC, product_id
 LIMIT 10;
 -- bytes estimate (dry run, derived dates): 21,975,163 bytes (20.96 MiB)
 

@@ -27,11 +27,12 @@ This is a work in progress. The foundation is built and the agent itself is not 
 |---|---|
 | Design of the whole agent (`DESIGN.md`) | The six query functions as tested code |
 | Metric definitions checked against the real data (`METRICS.md`) | The agent graph (route, plan, approve, run, summarize) |
-| Reference SQL for all six functions, run against BigQuery and checked | The dataset config file (tables, allowed values, the query menu) |
+| Reference SQL for all six functions, run against BigQuery and checked | A loader that reads the config file |
 | A script that runs queries under a 250 MiB per-query cap and writes a report | The model interface, approval step and audit log |
 | Data-quality checks and their results (`sql/`) | The question set and the evaluation results |
 | Notes on what went wrong and what was learned (`LESSONS.md`) | Terraform for the cloud setup |
 | Python project setup with pinned versions | Tests |
+| The dataset config: tables, limits and the query menu with each function's parameters and SQL (drafted; no code reads it yet) | |
 
 ## How it will work
 
@@ -131,7 +132,8 @@ bq-query-agent/
 ├── uv.lock                    exact dependency versions (committed so installs match)
 ├── .python-version            pins Python 3.12 for uv
 ├── .gitignore                 keeps credentials, local logs and caches out of git
-├── config/                    planned: dataset settings (tables, allowed values, the query menu)
+├── config/
+│   └── thelook.yaml           dataset settings: tables, limits, and the query menu with each function's parameters and SQL
 ├── src/
 │   ├── agent/                 planned: the agent graph, its steps, model interface and audit log
 │   └── functions/             planned: the six query functions
@@ -154,10 +156,11 @@ What the files do, in more detail:
 | `DESIGN.md` | The plan for the whole agent. Covers what it will and will not do, the list of query functions, each step of the graph, the safety rules, the audit record, and how it will be evaluated. |
 | `METRICS.md` | The single source of truth for what a number means. If a query and this file disagree, this file wins. Also holds the facts verified against the data and the list of known anomalies. |
 | `LESSONS.md` | A running list of mistakes, surprises and decisions, each with what was done about it. |
+| `config/thelook.yaml` | The one file that holds everything specific to this dataset: table names, the 250 MiB cap, allowed values such as the 26 product categories, and for each of the six functions its description, parameters, bounds and SQL template. Drafted and checked for consistency; no code loads it yet. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
 | `sql/reference_queries.sql` | One query for each of the six functions: revenue by period, top products, order status breakdown, average order value, return rate by category, and customers by traffic source. Dates are derived from the data. |
-| `sql/metrics_checks.sql` | Eight checks: table sizes, whether order and item statuses agree, timestamp problems, customers by traffic source, the date range, order versus item timestamps, monthly volume and daily volume. |
+| `sql/metrics_checks.sql` | Nine checks: table sizes, whether order and item statuses agree, timestamp problems, customers by traffic source, the date range, order versus item timestamps, monthly volume, daily volume and the list of product categories. |
 | `sql/results/*.md` | The output of the two scripts above, kept so the evidence can be read without re-running anything. |
 
 ## Running it

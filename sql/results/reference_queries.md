@@ -1,6 +1,6 @@
 # Results: reference_queries.sql
 
-Run 2026-10-26 20:07 UTC. Project bq-query-agent. Per-query cap 262,144,000 bytes (250.00 MiB).
+Run 2026-10-27 02:33 UTC. Project bq-query-agent. Per-query cap 262,144,000 bytes (250.00 MiB).
 
 ## 1. revenue_by_period
 
@@ -40,9 +40,9 @@ Run 2026-10-26 20:07 UTC. Project bq-query-agent. Per-query cap 262,144,000 byte
 | 24,179 | Arc'teryx Men's Diplomat Jacket | Outerwear & Coats | 3,150.00 | 7 | 1,732.50 |
 | 8,435 | Arc'teryx Women's Caliber Cardigan | Outerwear & Coats | 2,796.00 | 4 | 1,425.96 |
 | 8,409 | Canada Goose Women's Chilliwack Bomber | Outerwear & Coats | 2,780.00 | 4 | 1,629.08 |
-| 18,656 | JORDAN DURASHEEN SHORT MENS 404309-109 | Active | 2,709.00 | 3 | 1,598.31 |
+| 2,793 | adidas Women's adiFIT Slim Pant | Active | 2,709.00 | 3 | 1,582.06 |
 | 2,796 | ASCIS Cushion Low Socks (Pack of 3) | Active | 2,709.00 | 3 | 1,587.47 |
-| 24,428 | The North Face Apex Bionic Mens Soft Shell Ski Jacket 2013 | Outerwear & Coats | 2,709.00 | 3 | 1,449.31 |
+| 18,656 | JORDAN DURASHEEN SHORT MENS 404309-109 | Active | 2,709.00 | 3 | 1,598.31 |
 
 ## 3. order_status_breakdown
 
@@ -58,6 +58,28 @@ Run 2026-10-26 20:07 UTC. Project bq-query-agent. Per-query cap 262,144,000 byte
 | Processing | 9,967 |
 | Cancelled | 7,430 |
 | Returned | 5,012 |
+
+## 4. average_order_value
+
+- Dry-run estimate: 6,745,465 bytes (6.43 MiB)
+- Bytes processed: 6,745,465 bytes (6.43 MiB)
+- Bytes billed: 20,971,520 bytes (20.00 MiB)
+- Rows: 12
+
+| period | orders | revenue | average_order_value |
+|---|---|---|---|
+| 2025-11-01 | 1,948 | 167,963.24 | 86.22 |
+| 2025-12-01 | 2,180 | 174,573.97 | 80.08 |
+| 2026-01-01 | 2,267 | 195,953.99 | 86.44 |
+| 2026-02-01 | 2,268 | 199,275.34 | 87.86 |
+| 2026-03-01 | 2,487 | 209,825.96 | 84.37 |
+| 2026-04-01 | 2,522 | 211,759.22 | 83.96 |
+| 2026-05-01 | 2,929 | 260,527.21 | 88.95 |
+| 2026-06-01 | 2,908 | 246,030.39 | 84.60 |
+| 2026-07-01 | 3,322 | 293,357.11 | 88.31 |
+| 2026-08-01 | 3,671 | 317,010.05 | 86.36 |
+| 2026-09-01 | 4,184 | 363,018.26 | 86.76 |
+| 2026-10-01 | 6,828 | 589,606.66 | 86.35 |
 
 ## 5. return_rate_by_category
 
