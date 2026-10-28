@@ -13,7 +13,7 @@ This project takes a different route. The AI never writes a query. Instead:
 1. A short menu of pre-written, reviewed query functions exists (for example "revenue by month" or "top products").
 2. The AI's only job is to choose one function from the menu and fill in the blanks (dates, a category, how many results).
 3. Ordinary code, not the AI, checks the choice, estimates what the query would cost, and shows a person exactly what is about to run.
-4. Only after a person approves does the query run, with read-only access, and every run is written to a log.
+4. Only after a person approves does the query run, and every request is written to a log.
 
 The short version of the rule: the model proposes, code decides.
 
@@ -21,54 +21,55 @@ The data is the public BigQuery dataset `thelook_ecommerce`, a synthetic online 
 
 ## Status
 
-This is a work in progress. The agent runs end to end, with a person approving each query, but a keyword stub stands in for the AI model. No real model is connected yet.
+This is a work in progress. The agent runs end to end, with a person approving each query, but a keyword stub stands in for the AI model. The next step is to connect a Gemini model on Google Cloud's Vertex AI (see "Connecting a real model" below). None of that is built yet, and access to the model has not been tested.
 
 | Built and in this repo | Not built yet |
 |---|---|
-| Design of the whole agent (`DESIGN.md`) | A real AI model behind the model interface (a keyword stub is used today) |
-| Metric definitions checked against the real data (`METRICS.md`) | The question set and the evaluation results |
-| Reference SQL for all six functions, run against BigQuery and checked | A read-only service account |
-| The dataset config: tables, limits and the query menu with each function's parameters and SQL | A durable checkpointer (state is kept in memory) |
-| The six query functions as code (`src/functions/`): a loader that reads the config and fills its templates, and a runner that validates parameters, binds them as typed query parameters, dry-runs, refuses anything over 250 MiB and sets the same cap on the job | Terraform for the cloud setup |
-| The agent graph (`src/agent/`): route, plan, validate, cost check, approval (a LangGraph `interrupt()`), execute, summarize and audit, with one re-plan after a rejected plan | |
-| A model interface, `complete_structured(prompt, schema)`, and a keyword stub that implements it | |
-| An audit log: one JSON line per request in `audit.jsonl`, including refused, rejected, over-cap and declined ones | |
-| A command-line demo (`scripts/ask.py`) that asks for approval before running a query | |
-| Tests (`tests/`): config checks, validation, binding, both caps and every path through the graph with a stub BigQuery client; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries | |
-| A script that runs queries under a 250 MiB per-query cap and writes a report | |
-| Data-quality checks and their results (`sql/`) | |
-| Notes on what went wrong and what was learned (`LESSONS.md`) | |
-| Python project setup with pinned versions | |
+| Design of the whole agent (`DESIGN.md`) | A Gemini model on Vertex AI behind the model interface (a keyword stub is used today) |
+| Metric definitions checked against the real data (`METRICS.md`) | A plan schema built from the config, so the model can only name allowed parameters |
+| Reference SQL for all six functions, run against BigQuery and checked | Prompt hardening for a real model: escaping the question text, and checking that a summary's numbers appear in the rows |
+| The dataset config: tables, limits and the query menu with each function's parameters and SQL | The 24-question set and the evaluation results |
+| The six query functions as code (`src/functions/`): a loader that reads the config and fills its templates, and a runner that validates parameters, binds them as typed query parameters, dry-runs, refuses anything over 250 MiB and sets the same cap on the job | A read-only service account |
+| The agent graph (`src/agent/`): route, plan, validate, cost check, approval (a LangGraph `interrupt()`), execute, summarize and audit, with one re-plan after a rejected plan | A durable checkpointer (state is kept in memory) |
+| A model interface, `complete_structured(prompt, schema)`, and a keyword stub that implements it | Terraform for the cloud setup |
+| An audit log: one JSON line per request in `audit.jsonl`, including refused, rejected, over-cap and declined ones |  |
+| A command-line demo (`scripts/ask.py`) that asks for approval before running a query |  |
+| Tests (`tests/`): config checks, validation, binding, both caps and every path through the graph with a stub BigQuery client; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries |  |
+| A script that runs queries under a 250 MiB per-query cap and writes a report |  |
+| Data-quality checks and their results (`sql/`) |  |
+| Notes on what went wrong and what was learned (`LESSONS.md`) |  |
+| Python project setup with pinned versions |  |
 
 ## How it works
 
-This diagram shows the graph in `src/agent/graph.py`. Blue steps use an AI model (today a keyword stub), grey steps are plain code, and the orange step is a person.
+Read the diagram from the top. Blue steps use an AI model (today a keyword stub; Gemini on Vertex AI is planned), grey steps are ordinary code, and the orange step is a person. Red means the request stopped and nothing ran.
 
 ```mermaid
 flowchart TD
-    Q(["Question in plain English"])
-    R["1. Route: the AI decides whether to answer, ask a follow-up, or refuse"]
-    P["2. Plan: the AI picks one function from the menu and fills in its parameters"]
-    V["3. Validate: code checks the function and every parameter against the allowed list"]
-    C["4. Cost check: code asks BigQuery how much data the query would read"]
-    H{"5. Approval: a person sees the function, the parameters and the size"}
-    E["6. Execute: code runs the fixed query, read-only"]
-    S["7. Summarize: the AI writes a short answer from the returned rows"]
-    X(["Stop: nothing runs"])
-    A["8. Audit log: code records every run, including the stopped ones"]
-    D(["Shown to the person: the answer with the function and parameters used, or the reason it stopped"])
+    Q(["Your question, in plain English"])
+    R["1. Route (AI)<br/>Answer it, ask a follow-up, or refuse?"]
+    P["2. Plan (AI)<br/>Pick one pre-written query and fill in its blanks"]
+    V["3. Validate (code)<br/>Is that query, and every value, on the allowed list?"]
+    C["4. Cost check (code)<br/>How much data would it read? Is that under 250 MiB?"]
+    H{"5. Approval (you)<br/>Do you approve what is about to run?"}
+    E["6. Run (code)<br/>Run the fixed query"]
+    S["7. Summarize (AI)<br/>Write a short answer from the rows"]
+    X(["Stopped: nothing ran"])
+    A["8. Audit log (code)<br/>Record the request, whatever happened"]
+    D(["You see the answer, or the reason it stopped"])
 
     Q --> R
     R -->|answer| P
-    R -->|refuse or ask a follow-up| X
+    R -->|follow-up or refuse| X
     P --> V
     V -->|allowed| C
     V -->|not allowed| X
-    C -->|within 250 MiB| H
-    C -->|over 250 MiB| X
-    H -->|approved| E
-    H -->|declined| X
-    E --> S
+    C -->|under the cap| H
+    C -->|over the cap, or the check failed| X
+    H -->|approve| E
+    H -->|decline| X
+    E -->|rows come back| S
+    E -->|BigQuery error| X
     S --> A
     X --> A
     A --> D
@@ -83,7 +84,7 @@ flowchart TD
     class X stop
 ```
 
-Only steps 1, 2 and 7 use the AI. Everything that decides whether something is allowed, affordable or safe is ordinary code that can be read, tested and trusted to behave the same way every time.
+Only steps 1, 2 and 7 use the AI. Everything that decides whether something is allowed, affordable or safe is ordinary code that can be read, tested and trusted to behave the same way every time. A failed plan gets one second try (step 2 again, with the problems listed) before the request stops.
 
 ### The same flow over time
 
@@ -100,14 +101,14 @@ sequenceDiagram
     participant L as Audit log
 
     P->>G: Question in plain English
-    G->>M: Route: answer, ask a follow-up, or refuse? (menu descriptions included)
+    G->>M: Route: answer, ask a follow-up, or refuse?
     M-->>G: Route decision
 
     alt Follow-up needed, or out of scope
         G->>L: Record the request and the reason
         G-->>P: A follow-up question, or a refusal
     else Answerable from the menu
-        G->>M: Plan: pick one function and fill in its parameters
+        G->>M: Plan: pick one function and fill in its parameters (the menu is in this prompt)
         M-->>G: Plan as JSON: function name and parameters
 
         G->>C: Validate the function and every parameter
@@ -140,10 +141,10 @@ sequenceDiagram
                     G-->>P: Stopped
                 else Approved
                     G->>B: Run the query, with maximum_bytes_billed = 250 MiB
-                    alt BigQuery stops the job (bill would pass the cap)
-                        B-->>G: bytesBilledLimitExceeded (reported as HTTP 500)
+                    alt BigQuery stops the job or the query fails
+                        B-->>G: Error (for the billing cap: bytesBilledLimitExceeded, reported as HTTP 500)
                         G->>L: Record the error
-                        G-->>P: Stopped. Retrying would fail the same way
+                        G-->>P: Stopped. Nothing is retried
                     else Rows returned
                         B-->>G: Rows, bytes processed, bytes billed
                         G->>M: Summarize the rows
@@ -157,7 +158,33 @@ sequenceDiagram
     end
 ```
 
-All of this is built and tested, with a keyword stub in place of the AI model. Every request ends in the audit log, whether it was answered or stopped. The one exception is a request paused at approval and never resumed: it has not ended, so it has no audit line.
+All of this is built and tested, with a keyword stub in place of the AI model. Connecting a real model changes only the "AI model" column. Every request ends in the audit log, whether it was answered or stopped. The one exception is a request paused at approval and never resumed: it has not ended, so it has no audit line.
+
+### Connecting a real model (planned)
+
+The graph never talks to a particular AI model. It calls one function, `complete_structured(prompt, schema)`, and gets back a JSON answer. Today a keyword stub answers. The plan is to add a second class that answers with a Gemini model, and the graph does not change.
+
+```mermaid
+flowchart LR
+    G["Graph<br/>(built)"] -->|"complete_structured(prompt, schema)"| I{"Model interface<br/>(built)"}
+    I --> K["Keyword stub<br/>(built, used today)"]
+    I --> V["Gemini on Vertex AI<br/>(planned)"]
+    V -.->|"same Google login as BigQuery,<br/>no API key"| GC["Google Cloud"]
+
+    classDef built fill:#e5e7eb,stroke:#4b5563,color:#111111
+    classDef planned fill:#fef9c3,stroke:#a16207,color:#111111,stroke-dasharray: 5 3
+    class G,I,K built
+    class V,GC planned
+```
+
+What is planned, in order. None of it exists yet.
+
+1. **Access.** The Vertex AI API is on. Send one test message and one structured-output request to Gemini 3.8 Flash (the first candidate; the model ID is confirmed by the smoke test). Everything else waits for that to work.
+2. **The adapter.** A new `src/agent/gemini_model.py` that calls Gemini through Google's Python SDK (`google-genai`) on Vertex AI. It uses the same Google login as BigQuery. A refused or cut-off answer raises an error, which the graph already handles.
+3. **A plan schema built from the config.** The plan's parameters are generated from `config/thelook.yaml` (function name as an enum, every parameter listed with its allowed values and bounds) rather than left open. The code checks stay as the real guard, because a model's output is never trusted on the schema alone.
+4. **Hardening.** Today's date goes into the plan prompt so "last year" can be resolved, the question text is escaped before it enters a prompt, a summary's numbers are checked against the returned rows, and a failed audit write no longer hides the answer.
+5. **Tests.** Unit tests with a fake client, and a few real calls marked as integration tests.
+6. **Evaluation.** 24 hand-written questions scored on the right route, the right function and the right parameters, with each reference answer computed at test time because the dataset is regenerated.
 
 ### The safety rules
 
@@ -243,7 +270,7 @@ The project is not installed as a package, so put `src` on the path when running
 
 ## Project structure
 
-Files marked "planned" do not exist yet. Their folders hold an empty placeholder so the layout is visible.
+Files marked "planned" do not exist yet. The `eval/` and `infra/` folders hold an empty placeholder so the layout is visible.
 
 ```
 bq-query-agent/
@@ -257,12 +284,14 @@ bq-query-agent/
 ├── .python-version            pins Python 3.12 for uv
 ├── .gitignore                 keeps credentials, local logs and caches out of git
 ├── config/
-│   └── thelook.yaml           dataset settings: tables, limits, and the query menu with each function's parameters and SQL
+│   ├── thelook.yaml           dataset settings: tables, limits, and the query menu with each function's parameters and SQL
+│   └── model.yaml             planned: which model each step uses, and the Google Cloud location
 ├── src/
 │   ├── agent/
 │   │   ├── __init__.py        the public names: build_graph and the model classes
 │   │   ├── graph.py           the graph: its state, its eight nodes and the edges between them
 │   │   ├── models.py          the model interface, the output schemas and the keyword stub
+│   │   ├── gemini_model.py    planned: the same interface, answered by Gemini on Vertex AI
 │   │   └── audit.py           appends one JSON line per request to the audit log
 │   └── functions/
 │       ├── __init__.py        the public names: run, prepare, estimate, execute, load and the error types
@@ -279,7 +308,8 @@ bq-query-agent/
 ├── scripts/
 │   ├── ask.py                 command-line demo: ask one question, approve or decline, see the answer
 │   ├── dry_run_queries.py     asks BigQuery how much data each reference query would read
-│   └── run_queries.py         runs queries under the 250 MiB cap and writes a report
+│   ├── run_queries.py         runs queries under the 250 MiB cap and writes a report
+│   └── vertex_smoke_test.py   sends a plain and a structured-output request to a model, to check access before building on it
 └── sql/
     ├── reference_queries.sql  the checked SQL for each query function
     ├── metrics_checks.sql     queries that checked the data and its quirks
@@ -303,6 +333,7 @@ What the files do, in more detail:
 | `tests/` | `test_catalog.py`, `test_queries.py` and `test_agent.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
+| `scripts/vertex_smoke_test.py` | Sends two tiny real requests to a model (a plain message and a structured-output request with the same kind of schema the plan will use) and prints each result, with the likely cause of any failure. The default is Gemini on Vertex AI, using your Google login. It exists because access and quota are decided outside the code (`LESSONS.md`, lesson 16). |
 | `sql/reference_queries.sql` | One query for each of the six functions: revenue by period, top products, order status breakdown, average order value, return rate by category, and customers by traffic source. Dates are derived from the data. |
 | `sql/metrics_checks.sql` | Nine checks: table sizes, whether order and item statuses agree, timestamp problems, customers by traffic source, the date range, order versus item timestamps, monthly volume, daily volume and the list of product categories. |
 | `sql/results/*.md` | The output of the two scripts above, kept so the evidence can be read without re-running anything. |
@@ -332,6 +363,8 @@ uv run python scripts/ask.py "revenue by quarter"
 - **Bound parameter.** A value passed separately from the query text, so it can never be read as part of the query.
 - **LangGraph.** A framework for building AI workflows as a graph of steps, including a pause where a person can approve.
 - **Audit log.** A record of every request and what happened to it.
+- **Vertex AI.** Google Cloud's service for running AI models, including Gemini. Calls are billed to your Google Cloud project and use the same login as BigQuery.
+- **Structured output.** A way of making a model answer in a fixed JSON shape, so code can check the answer instead of guessing at text.
 - **Interrupt.** A LangGraph pause. The graph saves its state and waits, and it carries on when it is resumed with an answer.
 - **Checkpointer.** Where LangGraph keeps a paused graph's state. Here it is in memory, so a paused request is lost if the process stops.
 

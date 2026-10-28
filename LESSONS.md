@@ -62,6 +62,10 @@ When `maximum_bytes_billed` stops a job, the client raises `InternalServerError`
 
 The approval step pauses with `interrupt()` and carries on with `Command(resume=...)`. Two values passed to `resume` did not behave like answers in LangGraph 1.2.17. `Command(resume=None)` raised `UnboundLocalError` inside the library. `Command(resume={})` was read as an empty map of interrupt ids to answers, so nothing resumed and the request stayed paused. Neither runs a query, so both fail safe. Still, the approval node accepts only `True` or `{"approved": True}` and treats every other value as a decline, the demo always sends `True` or `False`, and a test pins the `{}` case so an upgrade that changes it gets noticed.
 
+## 16. A new project can have no quota for partner models
+
+The first real call to Claude on Vertex AI (Sonnet 5.5 and Haiku 5.5, global endpoint) returned HTTP 429 `RESOURCE_EXHAUSTED` on `global_online_prediction_requests_per_base_model`. Authentication, the Vertex AI API and the model enablement were all fine, so the error was about the project's quota, not a mistake in the request. The quota API reported the project as eligible for an increase, but the increase could not be obtained in the time available, and Google's forums describe the same pattern for new projects. The model sits behind one interface, so the fix was a different provider, not a change to the graph. The lesson for next time: send one real request to the chosen model on day one, before building anything on top of it, because access and quota are decided outside the code.
+
 ## Still open
 
 - The cause of the order-volume ramp since October 14 is not established. A data-generator artifact is the likeliest guess, but nothing here tests that.

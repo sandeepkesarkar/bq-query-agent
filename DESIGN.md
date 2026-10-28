@@ -81,6 +81,8 @@ Checkpointer: in-memory for the demo. Production would need a durable one. Say s
 
 One function: `complete_structured(prompt, schema) -> dict`. The model name comes from config. Swapping models must not touch the graph.
 
+Planned first real model: Gemini 3.8 Flash on Vertex AI, through Google's Python SDK (`google-genai`), using the same Google login as BigQuery. The model ID is confirmed by `scripts/vertex_smoke_test.py`, and a stronger model can be tried for the plan step if the evaluation shows it is needed. The stub stays for tests. The plan schema is generated from the catalog (function name as an enum, every parameter listed with its allowed values and bounds) and the code checks stay as the real guard. The plan prompt gets today's date, and the question text is escaped before it enters a prompt. Nothing here is built yet.
+
 ## Audit record
 
 JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name.
