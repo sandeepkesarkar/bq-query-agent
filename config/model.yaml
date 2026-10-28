@@ -1,0 +1,21 @@
+# Which model answers each step, and how it is called. No keys: the call uses your Google
+# login (gcloud application-default credentials). The project comes from GOOGLE_CLOUD_PROJECT,
+# or from `gcloud config get-value project`.
+provider: gemini
+location: global
+temperature: 0
+request_timeout_seconds: 60   # per attempt; a 429 or 5xx is retried once (retry_attempts counts the first try)
+retry_attempts: 2
+
+# Gemini 3.x thinking tokens count against max_output_tokens. A small cap returned an empty
+# reply with no error (LESSONS.md 17), so these are generous.
+tasks:
+  route:
+    model: gemini-3.8-flash
+    max_output_tokens: 1024
+  plan:
+    model: gemini-3.8-flash
+    max_output_tokens: 2048
+  summarize:
+    model: gemini-3.8-flash
+    max_output_tokens: 2048

@@ -50,7 +50,7 @@ As built, the state also carries route_reason, attempts (plans made), result_col
 Nodes:
 1. route (model): classify as answer, clarify or refuse. Out-of-scope and adversarial questions end here.
 2. plan (model): emit a JSON plan validated against a typed schema. Unknown function name means reject.
-3. validate (code): enum checks, bounds, date sanity. One re-plan allowed, then reject.
+3. validate (code): enum checks, bounds, date sanity. A plan must give both `start_date` and `end_date` or neither, because one end alone is valid but silently wrong (an omitted `end_date` runs to the latest data). One re-plan allowed, with the errors listed, then reject.
 4. cost_check (code): BigQuery dry run. Compare bytes processed with the cap. Over the cap means stop, no approval offered.
 5. approval (code): `interrupt()` shows the function, params and estimated bytes. Resume with `Command(resume=...)`.
 6. execute (code): run the parameterized query as the read-only service account, with a maximum-bytes-billed limit as a second cap.
@@ -69,6 +69,7 @@ Checkpointer: in-memory for the demo. Production would need a durable one. Say s
 |---|---|
 | Function allowlist | validate |
 | Enum and bounds checks | validate |
+| Both ends of a date window, or neither | validate |
 | Parameterized queries only | execute |
 | Dry-run bytes cap before approval | cost_check |
 | Human approval | approval |
@@ -81,11 +82,19 @@ Checkpointer: in-memory for the demo. Production would need a durable one. Say s
 
 One function: `complete_structured(prompt, schema) -> dict`. The model name comes from config. Swapping models must not touch the graph.
 
-Planned first real model: Gemini 3.8 Flash on Vertex AI, through Google's Python SDK (`google-genai`), using the same Google login as BigQuery. The model ID is confirmed by `scripts/vertex_smoke_test.py`, and a stronger model can be tried for the plan step if the evaluation shows it is needed. The stub stays for tests. The plan schema is generated from the catalog (function name as an enum, every parameter listed with its allowed values and bounds) and the code checks stay as the real guard. The plan prompt gets today's date, and the question text is escaped before it enters a prompt. Nothing here is built yet.
+First real model: Gemini 3.8 Flash on Vertex AI, through Google's Python SDK (`google-genai`), using the same Google login as BigQuery. It is built as `src/agent/gemini_model.py`, with settings in `config/model.yaml` (a model ID for each of route, plan and summarize, location, temperature, per-task output caps, timeout). A stronger model can be tried for the plan step if the evaluation shows it is needed. The stub stays for tests and is the default of `scripts/ask.py`.
+
+- The adapter raises on empty text, a finish reason other than STOP, JSON that does not parse, and a result that is not an object. It retries once on 429 or 5xx, using the SDK's retry options.
+- The plan schema is generated from the catalog (function name as an enum, every parameter listed with its allowed values and bounds). The code checks stay as the real guard.
+- The plan prompt gets today's date, and the question text is escaped before it enters a prompt.
+- After summarize, every number in the summary must appear in the rows. If one does not, the summary is replaced by a plain one built by code, and the audit line records it.
+- A failed audit write is reported on stderr and does not stop the answer.
+
+Tested without cloud access: the adapter (fake client), the schema, the prompt, the escaping, the summary check, the date-pair rule and the audit failure. Five tests against real Gemini passed on the last run, though the "last year" one can fail because the model sometimes omits `end_date` (4 correct plans and 2 rejections in 6 runs; see LESSONS.md 18). No evaluation has been run.
 
 ## Audit record
 
-JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name.
+JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name, summary_fallback.
 
 ## Eval
 
@@ -105,8 +114,8 @@ Make some questions hard enough that failures are expected. Report them.
 bq-query-agent/
   README.md
   DESIGN.md
-  config/thelook.yaml
-  src/agent/{graph.py, models.py, audit.py}   (the nodes live in graph.py)
+  config/{thelook.yaml, model.yaml}
+  src/agent/{graph.py, models.py, gemini_model.py, summary_check.py, audit.py}   (the nodes live in graph.py)
   src/functions/{catalog.py, queries.py}
   tests/
   eval/{questions.yaml, run_eval.py, results.md}

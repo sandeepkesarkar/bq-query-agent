@@ -5,8 +5,10 @@ returns a dict shaped like `schema`. Swapping in a real model means writing one 
 that method and a `name`; the graph does not change.
 
 The graph never trusts what comes back. Route output outside the allowed values is treated
-as a refusal, and a plan is checked by code in the validate node.
+as a refusal, and a plan is checked by code in the validate node. The plan schema is built
+from the catalog (plan_schema), so a model is shown the allowed names and values.
 """
+import html
 import json
 import re
 from typing import Protocol
@@ -21,15 +23,47 @@ ROUTE_SCHEMA = {
     "required": ["route", "reason"],
 }
 
-PLAN_SCHEMA = {
-    "title": "plan",
-    "type": "object",
-    "properties": {
-        "function": {"type": "string"},
-        "params": {"type": "object"},
-    },
-    "required": ["function", "params"],
-}
+def _param_schema(name, param, existing):
+    """The schema for one parameter, widened to cover `existing` (the same name in another function)."""
+    if param.type == "enum":
+        values = list(existing["enum"]) if existing else []
+        values += [v for v in param.values if v not in values]
+        schema = {"type": "string", "enum": values}
+    elif param.type == "int":
+        low = min(param.min, existing["minimum"]) if existing else param.min
+        high = max(param.max, existing["maximum"]) if existing else param.max
+        schema = {"type": "integer", "minimum": low, "maximum": high}
+    else:
+        schema = {"type": "string", "format": "date"}
+    if existing and existing["type"] != schema["type"]:
+        raise ValueError(f"parameter {name!r} has different types in different functions")
+    return schema
+
+
+def plan_schema(catalog):
+    """The plan schema, built from the catalog.
+
+    `function` is an enum of the function names. `params` lists every parameter name any
+    function uses, all optional, with the union of allowed values and bounds across the
+    functions that use it. The schema only narrows what a model writes; the checks in the
+    validate node are still the real guard, because they know which parameters belong to
+    which function.
+    """
+    properties = {}
+    for fn in catalog.functions.values():
+        for name, param in fn.params.items():
+            properties[name] = _param_schema(name, param, properties.get(name))
+    return {
+        "title": "plan",
+        "type": "object",
+        "properties": {
+            "function": {"type": "string", "enum": list(catalog.functions)},
+            "params": {"type": "object", "properties": properties, "additionalProperties": False},
+        },
+        "required": ["function", "params"],
+        "additionalProperties": False,
+    }
+
 
 SUMMARY_SCHEMA = {
     "title": "summary",
@@ -43,6 +77,11 @@ class StructuredModel(Protocol):
     name: str
 
     def complete_structured(self, prompt: str, schema: dict) -> dict: ...
+
+
+def escape_text(text):
+    """Make text safe to put between prompt tags: '<', '>' and '&' can no longer open or close a tag."""
+    return html.escape(str(text), quote=False)
 
 
 def block(prompt, tag):
@@ -97,12 +136,16 @@ class KeywordModel:
     def complete_structured(self, prompt, schema):
         task = schema.get("title")
         if task == "route":
-            return self._route(block(prompt, "question").lower())
+            return self._route(self._question(prompt).lower())
         if task == "plan":
-            return self._plan(block(prompt, "question"), block(prompt, "errors"))
+            return self._plan(self._question(prompt), block(prompt, "errors"))
         if task == "summary":
             return self._summary(prompt)
         raise ValueError(f"the keyword stub has no answer for schema {task!r}")
+
+    @staticmethod
+    def _question(prompt):
+        return html.unescape(block(prompt, "question"))  # the graph escapes it (escape_text)
 
     def _function(self, text):
         for name, words in FUNCTION_WORDS:
@@ -156,7 +199,8 @@ class KeywordModel:
         # error named, so it falls back to its default.
         allowed = self.params.get(function, set())
         rejected = set(re.findall(r"^(\w+):", errors, re.MULTILINE))
-        rejected |= {"start_date", "end_date"} if "is after end_date" in errors else set()
+        if "is after end_date" in errors or "given without" in errors:
+            rejected |= {"start_date", "end_date"}
         params = {k: v for k, v in params.items() if k in allowed and k not in rejected}
         return {"function": function, "params": params}
 

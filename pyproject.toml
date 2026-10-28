@@ -12,6 +12,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26.0",
     "pytest>=9.1.1",
 ]
 
@@ -19,5 +20,5 @@ dev = [
 pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 markers = [
-    "integration: needs BigQuery credentials; skipped when they are missing",
+    "integration: needs Google Cloud credentials (BigQuery, or Vertex AI for Gemini); skipped when they are missing",
 ]

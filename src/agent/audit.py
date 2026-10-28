@@ -9,7 +9,7 @@ DEFAULT_AUDIT_PATH = ROOT / "audit.jsonl"  # ignored by git
 FIELDS = [
     "timestamp", "audit_id", "question", "route", "status", "function", "params",
     "estimated_bytes", "approved", "bytes_processed", "bytes_billed", "row_count",
-    "error", "model_name",
+    "error", "model_name", "summary_fallback",
 ]
 
 
