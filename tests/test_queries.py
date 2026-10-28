@@ -5,7 +5,7 @@ from datetime import date, datetime
 import pytest
 
 from functions.catalog import load
-from stubs import StubClient
+from functions.fake_client import StubClient
 from functions.queries import (
     OverCapError, ValidationError, estimate, execute, prepare, run, validate,
 )

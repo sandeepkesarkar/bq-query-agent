@@ -13,7 +13,7 @@ from langgraph.types import Command
 from agent.graph import MAX_PLANS, build_graph
 from agent.models import KeywordModel
 from functions.catalog import load
-from stubs import BILLED, StubClient, StubRows
+from functions.fake_client import BILLED, StubClient, StubRows
 
 TODAY = date(2026, 10, 27)
 CAP = 250 * 1024 ** 2

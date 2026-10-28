@@ -26,7 +26,11 @@ RETRY_STATUS_CODES = [429, 500, 502, 503, 504]
 
 
 class ModelError(Exception):
-    """The model's answer cannot be used."""
+    """The model's answer cannot be used. `finish_reason` is the name Gemini gave, if any."""
+
+    def __init__(self, message, finish_reason=None):
+        super().__init__(message)
+        self.finish_reason = finish_reason
 
 
 def project_id():
@@ -105,11 +109,12 @@ class GeminiModel:
                              + (f" (prompt blocked: {feedback.block_reason})" if feedback else ""))
         reason = response.candidates[0].finish_reason
         if reason != types.FinishReason.STOP:
-            raise ModelError(f"{title}: the answer ended with finish reason "
-                             f"{getattr(reason, 'name', reason)}, not STOP")
+            name = getattr(reason, "name", str(reason))
+            raise ModelError(f"{title}: the answer ended with finish reason {name}, not STOP",
+                             finish_reason=name)
         text = (response.text or "").strip()
         if not text:
-            raise ModelError(f"{title}: the answer was empty")
+            raise ModelError(f"{title}: the answer was empty", finish_reason="EMPTY")
         try:
             out = json.loads(text)
         except json.JSONDecodeError as exc:

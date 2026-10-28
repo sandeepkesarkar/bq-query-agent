@@ -12,7 +12,7 @@ from agent.graph import build_graph
 from agent.models import KeywordModel, escape_text
 from agent.summary_check import fallback_summary, unmatched_numbers
 from functions.catalog import load
-from stubs import StubClient, StubRows
+from functions.fake_client import StubClient, StubRows
 from test_agent import TODAY, Agent, ScriptedModel
 
 ANSWER = {"route": "answer", "reason": "ok"}

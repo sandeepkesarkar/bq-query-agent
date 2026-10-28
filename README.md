@@ -307,7 +307,8 @@ bq-query-agent/
 │   └── functions/
 │       ├── __init__.py        the public names: run, prepare, estimate, execute, load and the error types
 │       ├── catalog.py         loads the config and fills each function's SQL template
-│       └── queries.py         validates a call, binds its parameters, dry-runs, caps and runs it
+│       ├── queries.py         validates a call, binds its parameters, dry-runs, caps and runs it
+│       └── fake_client.py     a stand-in BigQuery client, used by the tests and the evaluation runner
 ├── tests/
 │   ├── test_catalog.py        the loader and the config checks (no cloud access)
 │   ├── test_queries.py        validation, binding and both caps, with a stub client (no cloud access)
@@ -316,12 +317,13 @@ bq-query-agent/
 │   ├── test_plan_schema.py    the plan schema built from the catalog (no cloud access)
 │   ├── test_hardening.py      today's date in the prompt, escaping, the summary check, a failed audit write (no cloud access)
 │   ├── test_gemini_integration.py  five questions against real Gemini, with a stub BigQuery client (integration)
-│   ├── stubs.py               a stand-in BigQuery client for the tests above
+│   ├── test_run_eval.py       the evaluation scorer and the run counting (no cloud access)
 │   └── test_reference_match.py  each function against its reference SQL, and both caps on real jobs
 ├── eval/                      planned: the hand-written question set and its results
 ├── infra/                     planned: Terraform for the cloud setup
 ├── scripts/
 │   ├── ask.py                 command-line demo: ask one question, approve or decline, see the answer
+│   ├── run_eval.py            runs eval/questions.yaml through the graph with a stub or Gemini, scores it, writes a report under eval/results/
 │   ├── dry_run_queries.py     asks BigQuery how much data each reference query would read
 │   ├── run_queries.py         runs queries under the 250 MiB cap and writes a report
 │   └── vertex_smoke_test.py   sends a plain and a structured-output request to a model, to check access before building on it
@@ -348,7 +350,8 @@ What the files do, in more detail:
 | `src/agent/audit.py` | Writes one JSON line per request: time, question, route, status, function, parameters, estimated, processed and billed bytes, approval, row count, error, model name and whether the summary fallback was used. |
 | `config/model.yaml` | Which Gemini model each step uses, the location, temperature, per-task output caps, timeout and retry count. No keys. |
 | `scripts/ask.py` | The command-line demo described under "Asking the agent". |
-| `tests/` | `test_catalog.py`, `test_queries.py`, `test_agent.py`, `test_gemini_model.py`, `test_plan_schema.py` and `test_hardening.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. `test_gemini_integration.py` is also marked integration and is skipped without credentials. |
+| `scripts/run_eval.py` | Sends each question in `eval/questions.yaml` through the graph (`--model stub` or `gemini`, `--runs N`) with the date pinned to the file's date and a fake BigQuery client, declines every request at the approval step, scores route, function and parameters by the rules in the file's header, and writes a Markdown and a JSON report to `eval/results/`. Only the model calls cost anything. |
+| `tests/` | `test_catalog.py`, `test_queries.py`, `test_agent.py`, `test_gemini_model.py`, `test_plan_schema.py`, `test_hardening.py` and `test_run_eval.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. `test_gemini_integration.py` is also marked integration and is skipped without credentials. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
 | `scripts/vertex_smoke_test.py` | Sends two tiny real requests to a model (a plain message and a structured-output request with the same kind of schema the plan will use) and prints each result, with the likely cause of any failure. It tests Gemini on Vertex AI, using your Google login, and fails on an empty reply or a finish reason other than STOP. It exists because access and quota are decided outside the code (`LESSONS.md`, lesson 16). |
@@ -370,6 +373,7 @@ uv run python scripts/run_queries.py --file sql/reference_queries.sql
 uv run pytest -m "not integration"
 uv run pytest
 uv run python scripts/ask.py "revenue by quarter"
+uv run python scripts/run_eval.py --model stub     # or: --model gemini --runs 3 (bills Vertex AI)
 ```
 
 `uv sync` installs Python 3.12 and the dependencies. The first script runs nothing and only estimates the data scanned. The other two scripts run real queries against the public dataset, and your project pays for them. The first `pytest` line needs no cloud access. The second also runs the integration tests, which send about 40 queries to BigQuery. Each query here scans under 25 MiB, and BigQuery's free tier covers the first 1 TiB each month. Nothing in the repo contains credentials, and the ignore file keeps it that way.

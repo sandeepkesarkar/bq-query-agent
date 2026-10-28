@@ -13,7 +13,7 @@ from agent import GeminiModel
 from agent.gemini_model import project_id
 from agent.graph import build_graph
 from functions.catalog import load
-from stubs import StubClient
+from functions.fake_client import StubClient
 
 pytestmark = pytest.mark.integration
 

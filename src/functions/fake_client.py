@@ -1,4 +1,4 @@
-"""A stand-in for google.cloud.bigquery.Client, so tests need no cloud access."""
+"""A stand-in for google.cloud.bigquery.Client, so tests and the evaluation runner need no cloud access."""
 from types import SimpleNamespace
 
 BILLED = 10 * 1024 ** 2  # BigQuery's minimum bill for one table
