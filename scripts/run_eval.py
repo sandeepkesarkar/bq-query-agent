@@ -9,9 +9,12 @@ never summarize.
 Usage, from the repo root:
     uv run python scripts/run_eval.py                          # keyword stub, free
     uv run python scripts/run_eval.py --model gemini --runs 3  # real model; bills Vertex AI
+    uv run python scripts/run_eval.py --model gemini --runs 3 --workers 4 --label after-fix1
 
-Writes eval/results/<model>-<date>.md and .json (the date is today's, not the pinned one),
-and the audit lines for the run set to eval/results/audit-<model>-<date>.jsonl.
+Writes eval/results/<label>-<date>.md and .json (the label defaults to the model kind; the
+date is today's, not the pinned one), and the audit lines for the run set to
+eval/results/audit-<label>-<date>.jsonl. --workers N runs N different questions at a time;
+the runs of one question stay in order.
 
 Scoring (the rules are in the questions file's header): the route must match. For "answer"
 the function must match and the parameters must match exactly, after treating an omitted
@@ -23,6 +26,7 @@ import json
 import sys
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -45,19 +49,21 @@ TASKS = ["route", "plan", "summary"]
 # --- recording what the model did ---
 
 class Recorder:
-    """Wraps a model and records every call: the task, the output or error, tokens, time."""
+    """Wraps a model for one request and records every call: the task, the output or error,
+    the attempts it took, the cap it finished with, tokens and time. Make one per request, so
+    requests running in parallel do not mix."""
 
     def __init__(self, model):
         self.model = model
         self.name = getattr(model, "name", type(model).__name__)
         self.calls = []
 
-    def _tokens(self):
-        return [getattr(self.model, attr, 0) for attr in
-                ("prompt_tokens", "output_tokens", "thinking_tokens")]
+    @property
+    def last_call(self):
+        return getattr(self.model, "last_call", None)  # the graph reads this for the audit line
 
     def complete_structured(self, prompt, schema):
-        before, start = self._tokens(), time.perf_counter()
+        start = time.perf_counter()
         entry = {"task": schema["title"], "output": None, "error": None, "finish_reason": None}
         self.calls.append(entry)
         try:
@@ -68,9 +74,10 @@ class Recorder:
             entry["finish_reason"] = getattr(exc, "finish_reason", None)
             raise
         finally:
-            after = self._tokens()
-            entry["tokens"] = dict(zip(("prompt", "output", "thinking"),
-                                       (a - b for a, b in zip(after, before))))
+            info = self.last_call or {}
+            entry["attempts"] = info.get("attempts", 1)
+            entry["cap"] = info.get("cap")
+            entry["tokens"] = dict(info.get("tokens") or {"prompt": 0, "output": 0, "thinking": 0})
             entry["seconds"] = round(time.perf_counter() - start, 3)
 
 
@@ -160,9 +167,9 @@ def tally(records):
 
 # --- running ---
 
-def run_one(graph, recorder, question, audit_path):
-    """Send one question through the graph, decline at approval, and describe what happened."""
-    recorder.calls.clear()
+def run_one(graph, recorder, question):
+    """Send one question through the graph, decline at approval, and describe what happened.
+    `recorder` must be the one the graph was built with, and used for this request only."""
     config = {"configurable": {"thread_id": f"{question['id']}-{time.monotonic_ns()}"}}
     start = time.perf_counter()
     state = graph.invoke({"question": question["question"]}, config)
@@ -188,30 +195,38 @@ def run_one(graph, recorder, question, audit_path):
         "error": state.get("error"),
         "model_errors": [{"task": c["task"], "error": c["error"], "finish_reason": c["finish_reason"]}
                          for c in recorder.calls if c["error"]],
+        "calls": [{k: c[k] for k in ("task", "attempts", "cap", "finish_reason", "seconds")}
+                  | {"failed": bool(c["error"])} for c in recorder.calls],
         "tokens": tokens,
         "seconds": round(seconds, 3),
     }
 
 
-def run_set(questions, model_kind, runs, today, out_dir, stamp):
+def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1):
     catalog = load()
     model = GeminiModel() if model_kind == "gemini" else KeywordModel(catalog)
-    recorder = Recorder(model)
-    audit_path = out_dir / f"audit-{model_kind}-{stamp}.jsonl"
+    audit_path = out_dir / f"audit-{label}-{stamp}.jsonl"
     audit_path.unlink(missing_ok=True)
-    graph = build_graph(catalog, recorder, client=StubClient(1000), audit_path=audit_path, today=today)
 
-    records = []
-    for q in questions:
+    def run_question(q):
+        records = []
         for run in range(1, runs + 1):
-            got = run_one(graph, recorder, q, audit_path)
+            # A graph and a recorder per request, so parallel requests keep separate records.
+            recorder = Recorder(model)
+            graph = build_graph(catalog, recorder, client=StubClient(1000),
+                                audit_path=audit_path, today=today)
+            got = run_one(graph, recorder, q)
             passed, reason = score(q["expect"], got, catalog)
             got.update(id=q["id"], group=q["group"], question=q["question"], run=run,
                        expect=q["expect"], passed=passed, reason=reason)
             got["got"] = describe(got)
             records.append(got)
             print(f"{q['id']} run {run}: {'pass' if passed else 'MISS ' + reason}", flush=True)
-    return recorder.name, records, audit_path
+        return records
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        records = [r for batch in pool.map(run_question, questions) for r in batch]
+    return getattr(model, "name", type(model).__name__), records, audit_path
 
 
 # --- the report ---
@@ -233,7 +248,17 @@ def totals(records):
             for k in tokens[t]:
                 tokens[t][k] += r["tokens"][t][k]
     errors = Counter(e["finish_reason"] or e["error"] for r in records for e in r["model_errors"])
+    # Per task: how many calls were made, how many needed more than one attempt, and how many
+    # failed after their last attempt. Kept apart from the pass rate so escalation is visible.
+    calls = {t: {"calls": 0, "escalated": 0, "failed": 0} for t in TASKS}
+    for r in records:
+        for c in r["calls"]:
+            row = calls[c["task"]]
+            row["calls"] += 1
+            row["escalated"] += c["attempts"] > 1
+            row["failed"] += c["failed"]
     return {
+        "calls": calls,
         "requests": len(records),
         "replans": sum(r["replanned"] for r in records),
         "rejections": sum(r["rejected"] for r in records),
@@ -253,15 +278,18 @@ def summary_lines(model_name, records, runs):
     lines += [f"  {g}: {per_group[g]['passed']}/{per_group[g]['runs']}" for g in GROUPS if g in per_group]
     lines.append(f"Re-plans {t['replans']}, rejections {t['rejections']}, model errors {t['model_errors']}"
                  + (f" {t['model_error_kinds']}" if t["model_errors"] else "") + ".")
+    lines.append("Calls needing more than one attempt / failed after the last attempt / calls: "
+                 + ", ".join(f"{task} {v['escalated']}/{v['failed']}/{v['calls']}"
+                             for task, v in t["calls"].items() if v["calls"]) + ".")
     lines.append(f"Tokens {t['total_tokens']:,} (including thinking), time {t['seconds']}s over {t['requests']} requests.")
     return lines
 
 
-def markdown(model_name, records, runs, today, stamp):
+def markdown(model_name, records, runs, today, stamp, label=None):
     per_question, per_group = tally(records)
     t = totals(records)
     passed, total = sum(r["passed"] for r in records), len(records)
-    out = [f"# Evaluation: {model_name}, {stamp}", "",
+    out = [f"# Evaluation: {label or model_name}, {stamp}", "",
            f"- Model: `{model_name}`. Questions: {len(per_question)}. Runs per question: {runs}.",
            f"- Pinned date for relative phrases and the plan prompt: {today}.",
            "- BigQuery was not called (fake client). Every request that reached approval was declined.",
@@ -289,7 +317,14 @@ def markdown(model_name, records, runs, today, stamp):
     out += ["", "## Re-plans, rejections and errors", "",
             f"- Requests: {t['requests']}. Re-plans: {t['replans']}. Rejected: {t['rejections']}. "
             f"Model errors: {t['model_errors']}" + (f" ({t['model_error_kinds']})" if t["model_errors"] else "") + ".",
-            "", "## Tokens and time", "",
+            "", "## Escalation (separate from the score)", "",
+            "A call is escalated when it needed more than one attempt (the output cap was doubled after "
+            "MAX_TOKENS). Failed means it still ended in an error after its last attempt.", "",
+            "| Task | Calls | Needed more than one attempt | Failed after the last attempt |",
+            "|---|---|---|---|"]
+    for task, v in t["calls"].items():
+        out.append(f"| {task} | {v['calls']} | {v['escalated']} | {v['failed']} |")
+    out += ["", "## Tokens and time", "",
             "| Task | Prompt | Output | Thinking |", "|---|---|---|---|"]
     for task in TASKS:
         v = t["tokens"][task]
@@ -305,23 +340,29 @@ def main():
     parser.add_argument("--model", choices=["stub", "gemini"], default="stub")
     parser.add_argument("--runs", type=int, default=1, help="times to ask each question (default 1)")
     parser.add_argument("--out", type=Path, default=ROOT / "eval" / "results")
-    parser.add_argument("--questions", type=Path, default=QUESTIONS)
+    parser.add_argument("--questions", type=Path, default=QUESTIONS,
+                        help="the questions file (default eval/questions.yaml)")
+    parser.add_argument("--label", help="names the output files (default: the model kind)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="questions to run at the same time (default 1)")
     args = parser.parse_args()
-    if args.runs < 1:
-        parser.error("--runs must be at least 1")
+    if args.runs < 1 or args.workers < 1:
+        parser.error("--runs and --workers must be at least 1")
+    label = args.label or args.model
 
     spec = yaml.safe_load(args.questions.read_text())
     today = spec["today"] if isinstance(spec["today"], date) else date.fromisoformat(str(spec["today"]))
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     args.out.mkdir(parents=True, exist_ok=True)
 
-    name, records, audit_path = run_set(spec["questions"], args.model, args.runs, today, args.out, stamp)
+    name, records, audit_path = run_set(spec["questions"], args.model, args.runs, today, args.out,
+                                        label, stamp, args.workers)
 
-    base = args.out / f"{args.model}-{stamp}"
-    base.with_suffix(".md").write_text(markdown(name, records, args.runs, today, stamp))
+    base = args.out / f"{label}-{stamp}"
+    base.with_suffix(".md").write_text(markdown(name, records, args.runs, today, stamp, label))
     per_question, per_group = tally(records)
     base.with_suffix(".json").write_text(json.dumps({
-        "model": name, "date": stamp, "pinned_today": str(today), "runs": args.runs,
+        "model": name, "label": label, "workers": args.workers, "date": stamp, "pinned_today": str(today), "runs": args.runs,
         "per_group": per_group,
         "per_question": {k: {**v, "reasons": dict(v["reasons"]), "got": dict(v["got"])}
                          for k, v in per_question.items()},

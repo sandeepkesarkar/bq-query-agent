@@ -82,11 +82,13 @@ Checkpointer: in-memory for the demo. Production would need a durable one. Say s
 
 One function: `complete_structured(prompt, schema) -> dict`. The model name comes from config. Swapping models must not touch the graph.
 
-First real model: Gemini 3.8 Flash on Vertex AI, through Google's Python SDK (`google-genai`), using the same Google login as BigQuery. It is built as `src/agent/gemini_model.py`, with settings in `config/model.yaml` (a model ID for each of route, plan and summarize, location, temperature, per-task output caps, timeout). A stronger model can be tried for the plan step if the evaluation shows it is needed. The stub stays for tests and is the default of `scripts/ask.py`.
+First real model: Gemini 3.8 Flash on Vertex AI, through Google's Python SDK (`google-genai`), using the same Google login as BigQuery. It is built as `src/agent/gemini_model.py`, with settings in `config/model.yaml` (a model ID for each of route, plan and summarize, location, temperature, per-task output caps and ceilings, thinking level, timeout, retry counts). A stronger model can be tried for the plan step if the evaluation shows it is needed. The stub stays for tests and is the default of `scripts/ask.py`.
 
 - The adapter raises on empty text, a finish reason other than STOP, JSON that does not parse, and a result that is not an object. It retries once on 429 or 5xx, using the SDK's retry options.
+- Retry on `MAX_TOKENS`: a call that ends with `MAX_TOKENS`, and only that, is retried with the output cap doubled, never above the task's ceiling, at most `max_token_retries` (3) times, so at most 4 attempts. A call already cut off at the ceiling stops at once and raises with finish reason `MAX_TOKENS`. This count is separate from the 429/5xx retry. The tokens of every attempt are counted, and each call records its attempts and final cap; the audit line has an `attempts` field for route, plan and summarize.
+- Route and summarize ask for a low thinking level; plan keeps the default. A route prompt that does not state today's date or list the functions makes the model refuse valid questions and think too long (LESSONS.md 19).
 - The plan schema is generated from the catalog (function name as an enum, every parameter listed with its allowed values and bounds). The code checks stay as the real guard.
-- The plan prompt gets today's date, and the question text is escaped before it enters a prompt.
+- The route and plan prompts get today's date, and the question text is escaped before it enters a prompt. The plan prompt has one date rule: no period named, give neither date; a period named, give both. The menu says the two dates go together.
 - After summarize, every number in the summary must appear in the rows. If one does not, the summary is replaced by a plain one built by code, and the audit line records it.
 - A failed audit write is reported on stderr and does not stop the answer.
 
@@ -94,7 +96,7 @@ Tested without cloud access: the adapter (fake client), the schema, the prompt, 
 
 ## Audit record
 
-JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name, summary_fallback.
+JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name, summary_fallback, attempts.
 
 ## Eval
 

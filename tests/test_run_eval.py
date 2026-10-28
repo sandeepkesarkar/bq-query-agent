@@ -132,7 +132,8 @@ def test_describe(catalog):
 def record(qid, group, passed, reason="", got_text="x", **kw):
     return {"id": qid, "group": group, "passed": passed, "reason": reason, "got": got_text,
             "tokens": {t: {"prompt": 1, "output": 2, "thinking": 3} for t in ("route", "plan", "summary")},
-            "replanned": False, "rejected": False, "model_errors": [], "seconds": 1.0, **kw}
+            "replanned": False, "rejected": False, "model_errors": [], "seconds": 1.0,
+            "calls": [{"task": "route", "attempts": 1, "failed": False}], **kw}
 
 
 def test_n_run_counting():
@@ -172,12 +173,12 @@ def test_run_set_with_the_stub(tmp_path):
     from run_eval import QUESTIONS, markdown, run_set
     spec = yaml.safe_load(QUESTIONS.read_text())
     questions = [q for q in spec["questions"] if q["id"] in ("q03", "q17")]
-    name, records, audit_path = run_set(questions, "stub", 2, date(2026, 10, 28), tmp_path, "2026-10-28")
+    name, records, audit_path = run_set(questions, "stub", 2, date(2026, 10, 28), tmp_path, "t", "2026-10-28")
     assert name == "keyword-stub" and len(records) == 4
     assert [r["run"] for r in records] == [1, 2, 1, 2]
     assert all(r["passed"] for r in records)
     assert records[0]["status"] == "declined"  # stopped at approval, nothing executed
-    assert audit_path.parent == tmp_path and len(audit_path.read_text().splitlines()) == 4
+    assert audit_path == tmp_path / "audit-t-2026-10-28.jsonl" and len(audit_path.read_text().splitlines()) == 4
     report = markdown(name, records, 2, date(2026, 10, 28), "2026-10-28")
     assert "**4/4 passed (100%).**" in report and "| q03 | plain |" in report and "2/2" in report
 
@@ -202,6 +203,50 @@ def test_the_plan_prompt_uses_the_pinned_date(catalog, tmp_path):
     recorder = Recorder(model)
     graph = build_graph(catalog, recorder, client=StubClient(1000), audit_path=tmp_path / "a.jsonl",
                         today=date(2026, 10, 28))
-    run_one(graph, recorder, {"id": "q", "question": "order status"}, tmp_path / "a.jsonl")
+    run_one(graph, recorder, {"id": "q", "question": "order status"})
     plan_prompt = next(p for t, p in model.prompts if t == "plan")
     assert "Today's date (UTC) is 2026-10-28" in plan_prompt
+
+
+def test_parallel_workers_give_the_same_records_in_order(tmp_path):
+    from datetime import date
+
+    import yaml
+
+    from run_eval import QUESTIONS, run_set
+    questions = yaml.safe_load(QUESTIONS.read_text())["questions"][:8]
+    _, serial, _ = run_set(questions, "stub", 2, date(2026, 10, 28), tmp_path, "a", "d", workers=1)
+    _, parallel, audit = run_set(questions, "stub", 2, date(2026, 10, 28), tmp_path, "b", "d", workers=4)
+    key = lambda r: (r["id"], r["run"], r["got"], r["passed"], r["reason"])
+    assert [key(r) for r in parallel] == [key(r) for r in serial]
+    assert len(audit.read_text().splitlines()) == 16
+
+
+def test_escalation_counts_are_separate_from_the_score():
+    calls = lambda *specs: [{"task": t, "attempts": a, "failed": f} for t, a, f in specs]
+    records = [record("q1", "plain", True, calls=calls(("route", 3, False), ("plan", 1, False))),
+               record("q2", "plain", False, calls=calls(("route", 4, True)))]
+    t = totals(records)
+    assert t["calls"]["route"] == {"calls": 2, "escalated": 2, "failed": 1}
+    assert t["calls"]["plan"] == {"calls": 1, "escalated": 0, "failed": 0}
+    assert t["calls"]["summary"] == {"calls": 0, "escalated": 0, "failed": 0}
+    per_question, _ = tally(records)
+    assert per_question["q1"]["passed"] == 1  # escalation did not change the score
+
+
+def test_recorder_reports_attempts_cap_and_tokens_from_the_model():
+    from run_eval import Recorder
+
+    class Reporting:
+        name = "m"
+        last_call = {"task": "route", "attempts": 3, "cap": 8192,
+                     "tokens": {"prompt": 5, "output": 6, "thinking": 7}}
+
+        def complete_structured(self, prompt, schema):
+            return {"route": "answer", "reason": "ok"}
+
+    recorder = Recorder(Reporting())
+    recorder.complete_structured("p", {"title": "route"})
+    (call,) = recorder.calls
+    assert (call["attempts"], call["cap"], call["tokens"]["thinking"]) == (3, 8192, 7)
+    assert recorder.last_call["attempts"] == 3

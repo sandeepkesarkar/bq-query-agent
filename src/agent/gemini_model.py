@@ -7,10 +7,15 @@ The graph already treats an exception as a refusal at route, a rejected plan at 
 plain fallback at summarize, so this class raises on anything it cannot trust: empty text, a
 finish reason other than STOP (a cut-off or a safety block), JSON that does not parse, or a
 result that is not an object. Retrying a 429 or 5xx once is left to the SDK's retry options.
+
+A call that ends with MAX_TOKENS, and only that, is retried with the output cap doubled, up to
+the task's ceiling and at most `max_token_retries` times. The two retries are independent: the
+SDK's retry happens inside generate_content and never counts against the cap retries.
 """
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import yaml
@@ -55,54 +60,110 @@ class GeminiModel:
             raise ValueError(f"model.yaml provider is {config.get('provider')!r}, not 'gemini'")
         self.config = config
         self.tasks = config["tasks"]
+        for task, spec in self.tasks.items():
+            if "thinking_level" in spec and "thinking_budget" in spec:
+                raise ValueError(f"{task}: give thinking_level or thinking_budget, not both")
+            if spec.get("max_output_tokens_ceiling", spec["max_output_tokens"]) < spec["max_output_tokens"]:
+                raise ValueError(f"{task}: max_output_tokens_ceiling is below max_output_tokens")
+        self.max_token_retries = config.get("max_token_retries", 0)
         ids = {task: spec["model"] for task, spec in self.tasks.items()}
         # The audit line records this, so it names every model in use.
         self.name = (next(iter(ids.values())) if len(set(ids.values())) == 1
                      else ",".join(f"{task}={model}" for task, model in ids.items()))
         self._client = client
+        self._lock = threading.Lock()
+        self._local = threading.local()
         self.prompt_tokens = 0
         self.output_tokens = 0
         self.thinking_tokens = 0
 
-    def _get_client(self):
-        if self._client is None:
-            options = types.HttpOptions(
-                timeout=int(self.config["request_timeout_seconds"] * 1000),
-                retry_options=types.HttpRetryOptions(
-                    attempts=self.config["retry_attempts"],
-                    http_status_codes=RETRY_STATUS_CODES,
-                ),
-            )
-            self._client = genai.Client(
-                vertexai=True, project=project_id(), location=self.config["location"],
-                http_options=options,
-            )
-        return self._client
+    def http_options(self, **extra):
+        """The timeout and the 429/5xx retry, as the SDK takes them."""
+        return types.HttpOptions(
+            timeout=int(self.config["request_timeout_seconds"] * 1000),
+            retry_options=types.HttpRetryOptions(
+                attempts=self.config["retry_attempts"],
+                http_status_codes=RETRY_STATUS_CODES,
+            ),
+            **extra,
+        )
 
-    def _count(self, response):
-        usage = response.usage_metadata
-        if usage is not None:
-            self.prompt_tokens += usage.prompt_token_count or 0
-            self.output_tokens += usage.candidates_token_count or 0
-            self.thinking_tokens += usage.thoughts_token_count or 0
+    def _get_client(self):
+        # Under a lock: two threads that each built a client would leave one to be garbage
+        # collected, which closes it while another thread is still sending on it.
+        with self._lock:
+            if self._client is None:
+                self._client = genai.Client(
+                    vertexai=True, project=project_id(), location=self.config["location"],
+                    http_options=self.http_options(),
+                )
+            return self._client
+
+    @property
+    def last_call(self):
+        """What the calling thread's most recent complete_structured did: the task, how many
+        attempts it took, the cap it finished with, and the tokens of every attempt. None
+        before the first call."""
+        return getattr(self._local, "last", None)
+
+    def _thinking(self, spec):
+        if "thinking_level" in spec:
+            return types.ThinkingConfig(thinking_level=spec["thinking_level"].upper())
+        if "thinking_budget" in spec:
+            return types.ThinkingConfig(thinking_budget=spec["thinking_budget"])
+        return None
 
     def complete_structured(self, prompt, schema):
         title = schema.get("title")
         if title not in TASKS:
             raise ValueError(f"no model task for schema {title!r}")
-        task = self.tasks[TASKS[title]]
-        response = self._get_client().models.generate_content(
-            model=task["model"],
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=schema,
-                temperature=self.config["temperature"],
-                max_output_tokens=task["max_output_tokens"],
-            ),
-        )
-        self._count(response)
+        spec = self.tasks[TASKS[title]]
+        ceiling = spec.get("max_output_tokens_ceiling", spec["max_output_tokens"])
+        cap = spec["max_output_tokens"]
+        call = {"task": TASKS[title], "attempts": 0, "cap": cap,
+                "tokens": {"prompt": 0, "output": 0, "thinking": 0}}
+        self._local.last = call
+        while True:
+            call["attempts"] += 1
+            call["cap"] = cap
+            response = self._get_client().models.generate_content(
+                model=spec["model"],
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=schema,
+                    temperature=self.config["temperature"],
+                    max_output_tokens=cap,
+                    thinking_config=self._thinking(spec),
+                ),
+            )
+            self._count(response, call)
+            reason = response.candidates[0].finish_reason if response.candidates else None
+            if reason != types.FinishReason.MAX_TOKENS:
+                break
+            # Only a cut-off is retried. At the ceiling, or out of retries, it is an error.
+            if cap >= ceiling or call["attempts"] > self.max_token_retries:
+                raise ModelError(f"{title}: the answer ended with finish reason MAX_TOKENS at "
+                                 f"{cap} tokens after {call['attempts']} attempt(s)",
+                                 finish_reason="MAX_TOKENS")
+            cap = min(cap * 2, ceiling)
+        return self._parse(title, response)
 
+    def _count(self, response, call):
+        usage = response.usage_metadata
+        if usage is None:
+            return
+        counts = {"prompt": usage.prompt_token_count or 0, "output": usage.candidates_token_count or 0,
+                  "thinking": usage.thoughts_token_count or 0}
+        for key, n in counts.items():
+            call["tokens"][key] += n
+        with self._lock:
+            self.prompt_tokens += counts["prompt"]
+            self.output_tokens += counts["output"]
+            self.thinking_tokens += counts["thinking"]
+
+    @staticmethod
+    def _parse(title, response):
         if not response.candidates:
             feedback = response.prompt_feedback
             raise ModelError(f"{title}: no answer returned"

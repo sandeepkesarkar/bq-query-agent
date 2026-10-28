@@ -35,12 +35,44 @@ def prompt_for(model, title):
 
 # --- the plan prompt has today's date ---
 
-def test_plan_prompt_has_todays_date(make):
+def test_plan_prompt_has_todays_date_and_the_date_rule(make):
     model = ScriptedModel(route=[ANSWER], plan=[STATUS_PLAN])
     make(model=model).ask("order status for last year")
     prompt = prompt_for(model, "plan")
     assert f"Today's date (UTC) is {TODAY.isoformat()}" in prompt
-    assert "last year" in prompt and "last quarter" in prompt and "Omit start_date and end_date" in prompt
+    assert "names no period, give neither start_date nor end_date" in prompt
+    assert "give both, counted from today's date" in prompt
+    for phrase in ("last year", "last quarter", "September"):
+        assert phrase in prompt
+    # The older sentences that told the model to omit dates are gone.
+    assert "Omit start_date and end_date" not in prompt and "Omit a parameter to use" not in prompt
+
+
+def test_route_prompt_has_todays_date_and_every_function(make, catalog):
+    model = ScriptedModel(route=[{"route": "refuse", "reason": "no"}])
+    make(model=model).ask("anything")
+    prompt = prompt_for(model, "route")
+    assert f"Today's date (UTC) is {TODAY.isoformat()}" in prompt
+    for name, fn in catalog.functions.items():
+        assert f"- {name}: " in prompt
+    menu = prompt[prompt.index("<menu>"):prompt.index("</menu>")]
+    assert "default 10" not in menu and "YYYY-MM-DD" not in menu  # names and descriptions only
+    for rule in ("answer: when a function fits, even if details are missing",
+                 "clarify: only when no single function fits",
+                 "refuse: only for personal or customer-identifying data",
+                 "Never refuse because of the date range"):
+        assert rule in prompt
+
+
+def test_menu_date_lines_say_both_or_neither_and_never_omit(make, catalog):
+    from agent.graph import _menu
+    lines = [line for line in _menu(catalog).splitlines()
+             if line.strip().startswith(("start_date:", "end_date:"))]
+    assert len(lines) == 2 * len(catalog.functions)
+    for line in lines:
+        assert "omit" not in line.lower()
+        assert "both or neither" in line or "give neither" in line
+    assert "default window" not in " ".join(l for l in lines if l.strip().startswith("end_date"))
 
 
 def test_plan_prompt_uses_the_utc_date_when_none_is_given(catalog, tmp_path):
@@ -262,3 +294,34 @@ def test_the_stub_drops_a_lone_date_on_the_replan(make):
     state = agent.ask("revenue since 2026-03-01")
     assert state["attempts"] == 2
     assert state["__interrupt__"][0].value["params"] == {}
+
+
+# --- attempts in the audit line ---
+
+def test_audit_line_records_the_attempts_of_each_step(make):
+    class Reporting(ScriptedModel):
+        """Reports, like GeminiModel.last_call, how many attempts its latest call took."""
+        used = {"route": 1, "plan": 3, "summary": 2}
+
+        @property
+        def last_call(self):
+            return {"attempts": self.used[self.prompts[-1][0]]}
+
+    model = Reporting(route=[ANSWER], plan=[STATUS_PLAN], summary=[{"summary": "ok"}])
+    agent = make(model=model)
+    agent.ask("order status")
+    agent.resume(True)
+    assert agent.audit_lines()[0]["attempts"] == {"route": [1], "plan": [3], "summarize": [2]}
+
+
+def test_audit_attempts_cover_a_replan_and_default_to_one(make):
+    bad = {"function": "top_products", "params": {"n": 99}}
+    agent = make(model=ScriptedModel(route=[ANSWER], plan=[bad, bad]))
+    agent.ask("top 99")
+    assert agent.audit_lines()[0]["attempts"] == {"route": [1], "plan": [1, 1]}
+
+
+def test_a_refused_request_has_only_a_route_attempt(make):
+    agent = make()
+    agent.ask("customer emails")
+    assert agent.audit_lines()[0]["attempts"] == {"route": [1]}

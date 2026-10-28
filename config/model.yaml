@@ -4,18 +4,30 @@
 provider: gemini
 location: global
 temperature: 0
-request_timeout_seconds: 60   # per attempt; a 429 or 5xx is retried once (retry_attempts counts the first try)
-retry_attempts: 2
+request_timeout_seconds: 60   # per attempt
+retry_attempts: 2             # for a 429 or 5xx, by the SDK; counts the first try, so one retry
 
 # Gemini 3.x thinking tokens count against max_output_tokens. A small cap returned an empty
-# reply with no error (LESSONS.md 17), so these are generous.
+# reply with no error (LESSONS.md 17). A call that finishes with MAX_TOKENS (and only that) is
+# retried with the cap doubled, up to the task's ceiling, at most max_token_retries times.
+# This is separate from the 429/5xx retry above; the two do not share a count.
+max_token_retries: 3
+
+# thinking_level (low, medium or high) or thinking_budget (tokens), never both: Vertex rejects
+# the pair. gemini-3.8-flash rejects "minimal", and thinking_budget: 0 does not turn thinking
+# off. A task with neither keeps the model's default thinking.
 tasks:
   route:
     model: gemini-3.8-flash
-    max_output_tokens: 1024
+    max_output_tokens: 2048
+    max_output_tokens_ceiling: 8192
+    thinking_level: low
   plan:
     model: gemini-3.8-flash
     max_output_tokens: 2048
+    max_output_tokens_ceiling: 8192
   summarize:
     model: gemini-3.8-flash
     max_output_tokens: 2048
+    max_output_tokens_ceiling: 8192
+    thinking_level: low
