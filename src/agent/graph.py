@@ -93,6 +93,13 @@ def _menu(catalog):
     return "\n".join(lines)
 
 
+def _terms(catalog, enabled):
+    """The vocabulary as a "Terms" block for a prompt, or nothing when it is off or empty."""
+    if not enabled or not catalog.vocabulary:
+        return ""
+    return "Terms:\n" + "\n".join(f"- {sentence}" for sentence in catalog.vocabulary) + "\n"
+
+
 def _route_menu(catalog):
     """Function names with a one-line description each, and no parameters, for the route prompt."""
     return "\n".join(f"- {fn.name}: {_first_sentence(fn.description)}" for fn in catalog.functions.values())
@@ -130,8 +137,11 @@ def _date_pair_errors(catalog, function, params):
 
 
 def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_PATH,
-                checkpointer=None, today=None):
-    """Build and compile the graph. `client` defaults to a real BigQuery client."""
+                checkpointer=None, today=None, vocabulary=None):
+    """Build and compile the graph. `client` defaults to a real BigQuery client. `vocabulary`
+    (True or False) overrides the catalog's vocabulary_in_prompts."""
+
+    terms = _terms(catalog, catalog.vocabulary_in_prompts if vocabulary is None else vocabulary)
 
     plan_schema_ = plan_schema(catalog)
 
@@ -157,6 +167,7 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
             "You answer questions about an online clothing store's sales data by choosing one "
             "query function from a fixed menu. Decide whether to answer, clarify or refuse.\n"
             f"Today's date (UTC) is {today_utc().isoformat()}.\n"
+            f"{terms}"
             f"<menu>\n{_route_menu(catalog)}\n</menu>\n"
             "Rules:\n"
             "- answer: when a function fits, even if details are missing. The person approves "
@@ -198,6 +209,7 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
             "period, give neither start_date nor end_date. If it names a period, explicitly or "
             "like \"last year\", \"last quarter\" or \"September\", give both, counted from "
             "today's date.\n"
+            f"{terms}"
             f"<menu>\n{_menu(catalog)}\n</menu>\n"
             f"<question>\n{escape_text(state['question'])}\n</question>"
         )

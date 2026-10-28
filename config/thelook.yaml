@@ -41,6 +41,24 @@ limits:
   date_min: 2019-01-01             # before the first order; the data is regenerated (LESSONS.md 13)
   date_max: today_utc              # a date after today is rejected
 
+# Definitions of the period words a question may use. When vocabulary_in_prompts is true they
+# are listed under "Terms" in the route and plan prompts. The same rules, in code, are in
+# tests/resolve_period.py, which the tests use to check the expected dates in eval/questions.yaml.
+# Off until the evaluation shows it helps.
+vocabulary_in_prompts: false
+vocabulary:
+  - Periods are calendar periods in UTC.
+  - Q1, Q2, Q3 and Q4 are Jan-Mar, Apr-Jun, Jul-Sep and Oct-Dec.
+  - There is no fiscal calendar.
+  - The first half is Jan 1 to Jun 30 and the second half is Jul 1 to Dec 31.
+  - '"Last year", "last quarter" and "last month" mean the most recent complete one.'
+  - '"This year", "this quarter", "this month" and "year to date" run from the start of the current period through today.'
+  - A named month or quarter with no year is the most recent one that has already started.
+  - '"Last N months" is the N most recent complete calendar months.'
+  - '"All time" is 2019-01-01 through today.'
+  - Day, week, hour and fiscal periods are not supported, so ask a follow-up and offer months.
+  - For every period phrase, give both start_date and end_date.
+
 enums:
   # From check 9 (sql/metrics_checks.sql, query 9), run Oct 27, 2026 UTC. 26 categories.
   category:

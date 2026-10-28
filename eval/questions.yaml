@@ -10,6 +10,9 @@
 # pinned date below, not the real clock, so the expected values never go stale. Every window
 # ends on or before 2026-09-30.
 #
+# period: optional. The phrase the question's dates come from; tests/test_resolve_period.py checks
+# the expected dates against tests/resolve_period.py. The scorer ignores it.
+#
 # Parameter rules for scoring:
 #   - expect.params lists every parameter the question fixes, with its exact value.
 #   - A parameter the agent omits counts as its default.
@@ -29,6 +32,7 @@ questions:
   - id: q02
     group: plain
     question: "Show quarterly revenue for 2025."
+    period: "2025"
     expect: {route: answer, function: revenue_by_period,
              params: {group_by: quarter, start_date: "2025-01-01", end_date: "2025-12-31"}}
   - id: q03
@@ -40,6 +44,7 @@ questions:
   - id: q04
     group: plain
     question: "Which 10 products sold the most units in 2025?"
+    period: "2025"
     expect: {route: answer, function: top_products,
              params: {metric: units, n: 10, start_date: "2025-01-01", end_date: "2025-12-31"}}
   - id: q05
@@ -50,6 +55,7 @@ questions:
   - id: q06
     group: plain
     question: "How many orders were cancelled, shipped or returned in the first half of 2026?"
+    period: "first half of 2026"
     expect: {route: answer, function: order_status_breakdown,
              params: {start_date: "2026-01-01", end_date: "2026-06-30"}}
   - id: q07
@@ -65,6 +71,7 @@ questions:
   - id: q09
     group: plain
     question: "Return rate by category for 2025, only categories with at least 200 orders."
+    period: "2025"
     expect: {route: answer, function: return_rate_by_category,
              params: {start_date: "2025-01-01", end_date: "2025-12-31", min_orders: 200}}
   - id: q10
@@ -79,6 +86,7 @@ questions:
   - id: q12
     group: plain
     question: "Customers by traffic source for 2025."
+    period: "2025"
     expect: {route: answer, function: customers_by_traffic_source,
              params: {start_date: "2025-01-01", end_date: "2025-12-31"}}
 
@@ -86,21 +94,25 @@ questions:
   - id: q13
     group: relative_date
     question: "Show revenue by month last year."
+    period: "last year"
     expect: {route: answer, function: revenue_by_period,
              params: {start_date: "2025-01-01", end_date: "2025-12-31"}}
   - id: q14
     group: relative_date
     question: "Top 5 products by revenue last quarter."
+    period: "last quarter"
     expect: {route: answer, function: top_products,
              params: {metric: revenue, n: 5, start_date: "2026-07-01", end_date: "2026-09-30"}}
   - id: q15
     group: relative_date
     question: "Order status breakdown for September."
+    period: "September"
     expect: {route: answer, function: order_status_breakdown,
              params: {start_date: "2026-09-01", end_date: "2026-09-30"}}
   - id: q16
     group: relative_date
     question: "Customers by traffic source for the first half of this year."
+    period: "first half of this year"
     expect: {route: answer, function: customers_by_traffic_source,
              params: {start_date: "2026-01-01", end_date: "2026-06-30"}}
 

@@ -59,6 +59,8 @@ class Catalog:
     limits: dict
     functions: dict                # name -> Function
     lookups: dict = field(repr=False)  # tables, constants and snippets, by placeholder name
+    vocabulary: tuple = ()         # short sentences defining the period words a question may use
+    vocabulary_in_prompts: bool = False  # whether the route and plan prompts carry them
 
     def render(self, function_name, choices):
         """Return the SQL for one function, with every {placeholder} filled.
@@ -141,6 +143,9 @@ def load(path=DEFAULT_CONFIG):
                 raise ConfigError(f"placeholder {{{key}}} is defined twice")
             lookups[key] = value
 
+    if not isinstance(raw.get("vocabulary_in_prompts", False), bool):
+        raise ConfigError("vocabulary_in_prompts must be true or false")
+
     functions = {}
     for fn_name, spec in raw["functions"].items():
         params = {
@@ -180,8 +185,11 @@ def load(path=DEFAULT_CONFIG):
         functions[fn_name] = fn
 
     catalog = Catalog(
-        dataset=raw["dataset"], limits=raw["limits"], functions=functions, lookups=lookups
+        dataset=raw["dataset"], limits=raw["limits"], functions=functions, lookups=lookups,
+        vocabulary=tuple(raw.get("vocabulary") or ()),
+        vocabulary_in_prompts=bool(raw.get("vocabulary_in_prompts", False)),
     )
+
     # Render every slot combination once, so a bad template fails at load and not mid-question.
     for fn in functions.values():
         for choices in _slot_choices(fn):

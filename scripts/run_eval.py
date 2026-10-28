@@ -202,7 +202,7 @@ def run_one(graph, recorder, question):
     }
 
 
-def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1):
+def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1, vocabulary=None):
     catalog = load()
     model = GeminiModel() if model_kind == "gemini" else KeywordModel(catalog)
     audit_path = out_dir / f"audit-{label}-{stamp}.jsonl"
@@ -214,7 +214,7 @@ def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1
             # A graph and a recorder per request, so parallel requests keep separate records.
             recorder = Recorder(model)
             graph = build_graph(catalog, recorder, client=StubClient(1000),
-                                audit_path=audit_path, today=today)
+                                audit_path=audit_path, today=today, vocabulary=vocabulary)
             got = run_one(graph, recorder, q)
             passed, reason = score(q["expect"], got, catalog)
             got.update(id=q["id"], group=q["group"], question=q["question"], run=run,
@@ -345,6 +345,8 @@ def main():
     parser.add_argument("--label", help="names the output files (default: the model kind)")
     parser.add_argument("--workers", type=int, default=1,
                         help="questions to run at the same time (default 1)")
+    parser.add_argument("--vocabulary", choices=["on", "off"],
+                        help="put the Terms in the route and plan prompts (default: vocabulary_in_prompts)")
     args = parser.parse_args()
     if args.runs < 1 or args.workers < 1:
         parser.error("--runs and --workers must be at least 1")
@@ -356,13 +358,14 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
 
     name, records, audit_path = run_set(spec["questions"], args.model, args.runs, today, args.out,
-                                        label, stamp, args.workers)
+                                        label, stamp, args.workers,
+                                        {"on": True, "off": False}.get(args.vocabulary))
 
     base = args.out / f"{label}-{stamp}"
     base.with_suffix(".md").write_text(markdown(name, records, args.runs, today, stamp, label))
     per_question, per_group = tally(records)
     base.with_suffix(".json").write_text(json.dumps({
-        "model": name, "label": label, "workers": args.workers, "date": stamp, "pinned_today": str(today), "runs": args.runs,
+        "model": name, "label": label, "workers": args.workers, "vocabulary": args.vocabulary, "date": stamp, "pinned_today": str(today), "runs": args.runs,
         "per_group": per_group,
         "per_question": {k: {**v, "reasons": dict(v["reasons"]), "got": dict(v["got"])}
                          for k, v in per_question.items()},
