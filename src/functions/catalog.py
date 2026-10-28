@@ -61,6 +61,7 @@ class Catalog:
     lookups: dict = field(repr=False)  # tables, constants and snippets, by placeholder name
     vocabulary: tuple = ()         # short sentences defining the period words a question may use
     vocabulary_in_prompts: bool = False  # whether the route and plan prompts carry them
+    date_schema: str = "flat"      # how the plan schema asks for dates: flat or period
 
     def render(self, function_name, choices):
         """Return the SQL for one function, with every {placeholder} filled.
@@ -129,6 +130,9 @@ def _param(fn_name, name, spec, enums):
     return param
 
 
+DATE_SCHEMAS = ("flat", "period")
+
+
 def load(path=DEFAULT_CONFIG):
     """Read the config, check it is consistent, and return a Catalog."""
     raw = yaml.safe_load(Path(path).read_text())
@@ -145,6 +149,9 @@ def load(path=DEFAULT_CONFIG):
 
     if not isinstance(raw.get("vocabulary_in_prompts", False), bool):
         raise ConfigError("vocabulary_in_prompts must be true or false")
+
+    if raw.get("date_schema", "flat") not in DATE_SCHEMAS:
+        raise ConfigError(f"date_schema must be one of {list(DATE_SCHEMAS)}")
 
     functions = {}
     for fn_name, spec in raw["functions"].items():
@@ -188,6 +195,7 @@ def load(path=DEFAULT_CONFIG):
         dataset=raw["dataset"], limits=raw["limits"], functions=functions, lookups=lookups,
         vocabulary=tuple(raw.get("vocabulary") or ()),
         vocabulary_in_prompts=bool(raw.get("vocabulary_in_prompts", False)),
+        date_schema=raw.get("date_schema", "flat"),
     )
 
     # Render every slot combination once, so a bad template fails at load and not mid-question.

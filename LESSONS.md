@@ -91,11 +91,47 @@ Four misses remain. "Show quarterly revenue for 2025" went from 3/3 to 1/3: two 
 
 Two cautions. The causes were found by reading the baseline results for these 24 questions, and the prompts were then changed to fix them, so the second score is not a clean measure of how the agent generalises. It shows that the fixes work on the questions that exposed the problems. And the fixes were not tried one at a time, so how much each one contributed is unknown.
 
+## 20. Defining the period words did not help, because the failure is mechanical
+
+The hypothesis was that the model drops `end_date` because it does not know what phrases like "last quarter" or "September" mean. A vocabulary section (11 one-sentence definitions in `config/thelook.yaml`) was rendered as "Terms" in the route and plan prompts, and the 24 questions were run 3 times each with it on (`v6-vocab-on`, 4 workers), against the run before it (`after-fix1`, vocabulary off, same code). Numbers recomputed from the two result files:
+
+| | vocabulary off | vocabulary on |
+|---|---|---|
+| Passed | 68/72 | 58/72 |
+| First plan has a lone `start_date` or `end_date` | 11 of 72 requests | 22 of 72 requests |
+| ...of those, the question states both dates | 3 (q05, q08, q11) | 10 (q01, q05, q07, q08, q11) |
+| Model errors | 1 | 10 (9 x 504, 1 x 429) |
+| Seconds spent in the failed calls | 117.0 | 951.7 |
+| Route calls that failed | 0 | 4 |
+| Summed request time | 1,089.6 s | 2,831.2 s |
+
+The drop from 68 to 58 is mostly Vertex errors, not wrong plans: 10 errors took 951.7 s of the 1,741.6 s extra run time, and 4 of them were route calls, whose prompt is short and thinking is low, so they look like slowness or throttling at 4 workers, not prompt length. The wrong-plan numbers are the useful ones. The lone-date rate doubled, and it includes questions that print both dates ("from 2026-07-01 to 2026-09-30"). A model that has the dates in front of it and writes only one cannot be helped by a definition of "last quarter". The failure is in how the plan is written, not in what the words mean. The vocabulary switch (`vocabulary_in_prompts`, default off), `tests/resolve_period.py` and the `period:` annotations on the questions stay in the repo; the switch is off.
+
+## 21. A plan schema that cannot write a lone date removed the lone dates
+
+Lesson 20 left the cause of the lone `start_date` as mechanical: the model writes one date even when it has both. The schema was the place to stop it. `date_schema: period` replaces `start_date` and `end_date` in the plan schema with one required `period`, which is null or an object with both dates required. The graph flattens the reply back to `start_date` and `end_date` before validation, so everything after the plan sees the same params as before, and the validator's date-pair rule stays as a backstop. Vertex accepted the `anyOf` of null and an object in `response_json_schema` on the first try.
+
+A probe (`scripts/run_probe.py`, `eval/results/probe-dates.md`) ran five variants round robin on the ten date-heavy questions (q02, q06, q07, q08, q09, q11, q12, q13, q15, q16), 2 workers, vocabulary off. It was planned for 10 runs per question and stopped after round 2 (4 runs per question, 40 per variant) to save time, so every rate below has a denominator of 40.
+
+| Variant | First-plan pass | First-plan lone date | Final pass | Rejections | Re-plans | Errors 504 / 429 | Plan s p50 / p90 / max | Tokens |
+|---|---|---|---|---|---|---|---|---|
+| P0 flat, default thinking | 21/40 | 19/40 (48%) | 36/40 | 4 | 19 | 0 / 0 | 4.6 / 11.3 / 62.9 | 137,071 |
+| P1 flat, plan thinking medium | 26/40 | 12/40 (30%) | 36/40 | 2 | 12 | 0 / 2 | 4.5 / 39.7 / 75.8 | 118,497 |
+| P2 period, default thinking | 40/40 | 0/40 | 40/40 | 0 | 0 | 0 / 0 | 4.2 / 18.0 / 62.6 | 95,883 |
+| P3 period, plan thinking medium | 38/40 | 0/40 | 40/40 | 0 | 2 | 1 / 1 | 4.1 / 8.2 / 63.4 | 96,085 |
+| P4 period, plan thinking low | 40/40 | 0/40 | 40/40 | 0 | 0 | 0 / 0 | 2.8 / 7.9 / 25.9 | 89,588 |
+
+The rule written before the run chose the period schema (lone-date rate 0% against 2% allowed, final pass 100% against 90%) and then the lowest thinking level that was within one run of the best and had a plan p90 no higher than the default's: P4, plan `thinking_level: low`. Both are now the defaults. The flat variants lost 4 of 40 requests each to the lone date; their questions below 8/10 were q02, q06, q07, q15 (P0) and q02, q12, q15, q16 (P1); the period variants had none. The first plan was right 100% of the time with period and low thinking, against 52% flat.
+
+Full evaluation on the new defaults (`after-fix2`, 24 questions, 3 runs, 2 workers): 72 of 72, with 0 wrong answers, 0 model errors, 0 re-plans and 0 lone-date first plans, against 68 of 72 for `after-fix1`. q02 and q15, the two questions that were 1/3, are 3/3, and no question got worse. Tokens fell from 160,942 to 127,018 and summed request time from 1,089.6 s to 691.0 s. Two cautions. The prompts were tuned on these 24 questions, so 72/72 is not a measure of generalisation. And Vertex had no 504s in this run or in the probe, which it did in the vocabulary run (lesson 20), so part of the speed-up may be calmer conditions.
+
+Two things in the probe's own numbers. The call times of 60 s or more are a timed-out attempt (the limit was 60 s) followed by a quick retry, so the p99 of all "successful" calls is the timeout itself. The per-task timeouts in `config/model.yaml` are 3 times the p99 of the calls under 60 s (route 22.8 s, plan 25.9 s), and the retries are now 3 attempts. That is longer than the old 60 s for these two tasks, while the data suggest a hung call is usually fine on the retry; a shorter timeout might recover sooner. That was not tried.
+
 ## Still open
 
 - The cause of the order-volume ramp since October 14 is not established. A data-generator artifact is the likeliest guess, but nothing here tests that.
 - At temperature 0 the real model is not deterministic: the same question gave a different route in three runs (lesson 18), so a single run says little. The evaluation uses 3 runs per question for that reason.
-- When the plan call itself fails (for example a 504), the validate node replaces its error with "the plan is not an object", so the audit line and the state lose the real cause. The evaluation report still has it, from the recorded model errors. Not changed.
-- A lone `start_date` still gets through the model about as often as before; only the validator stops it. Whether the re-plan prompt could say more is untested.
+- A failed plan call used to be reported as "the plan is not an object"; it is now reported as the model error and ends with status `error` (fixed alongside lesson 21). The re-plan after a failed call still tells the model its previous plan was rejected, though there was none.
+- With `date_schema: period` a lone date cannot be written, so the validator's date-pair rule is only a backstop. With `flat` the model still wrote one in about half of the first plans of the date-heavy questions (lesson 21).
 - The return-window figures in lesson 4 were measured from the item's `created_at` and have not been repeated on the order clock. The 30-day window leaves a wide margin either way.
 - Because the data is regenerated (lesson 13), eval answers cannot be fixed numbers stored once. Either compute each reference answer from its reference SQL at eval time, or snapshot the tables into a project dataset. Not decided.

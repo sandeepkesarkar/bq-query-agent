@@ -10,6 +10,13 @@ Usage, from the repo root:
     uv run python scripts/run_eval.py                          # keyword stub, free
     uv run python scripts/run_eval.py --model gemini --runs 3  # real model; bills Vertex AI
     uv run python scripts/run_eval.py --model gemini --runs 3 --workers 4 --label after-fix1
+    uv run python scripts/run_eval.py --model gemini --ids q02,q15 --set date_schema=period \\
+        --set tasks.plan.thinking_level=medium
+
+--set KEY=VALUE changes one config value for this run only, without editing a file. KEY is
+date_schema or vocabulary_in_prompts (config/thelook.yaml), or a path into config/model.yaml
+such as tasks.plan.thinking_level or request_timeout_seconds; a VALUE of null removes the key.
+--ids q01,q02 runs only those questions.
 
 Writes eval/results/<label>-<date>.md and .json (the label defaults to the model kind; the
 date is today's, not the pinned one), and the audit lines for the run set to
@@ -22,6 +29,7 @@ parameter as its catalog default and ignoring an extra one that equals its defau
 error that stops the request is a miss, whatever the route was supposed to be.
 """
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -37,13 +45,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from langgraph.types import Command  # noqa: E402
 
 from agent import GeminiModel, KeywordModel, build_graph  # noqa: E402
+from agent.gemini_model import DEFAULT_CONFIG as MODEL_CONFIG  # noqa: E402
+from agent.models import flatten_plan  # noqa: E402
 from functions import load  # noqa: E402
+from functions.catalog import DATE_SCHEMAS  # noqa: E402
 from functions.fake_client import StubClient  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 QUESTIONS = ROOT / "eval" / "questions.yaml"
 GROUPS = ["plain", "relative_date", "refuse", "clarify", "defaults"]
 TASKS = ["route", "plan", "summary"]
+CATALOG_KEYS = ("date_schema", "vocabulary_in_prompts")   # config/thelook.yaml; the rest is model.yaml
 
 
 # --- recording what the model did ---
@@ -187,7 +199,8 @@ def run_one(graph, recorder, question):
         "route": state.get("route"),
         "route_reason": state.get("route_reason"),
         "status": state.get("status"),
-        "first_plan": first,
+        "first_plan": first,                      # as the model wrote it
+        "first_plan_flat": flatten_plan(first),   # the same, as start_date and end_date
         "final_plan": state.get("plan"),
         "replanned": len(plans) > 1,
         "rejected": state.get("status") == "rejected",
@@ -202,11 +215,56 @@ def run_one(graph, recorder, question):
     }
 
 
-def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1, vocabulary=None):
-    catalog = load()
-    model = GeminiModel() if model_kind == "gemini" else KeywordModel(catalog)
+def parse_sets(items):
+    """['a.b=1', 'c=true'] -> {'a.b': 1, 'c': True}. The value is read as YAML."""
+    out = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"--set wants KEY=VALUE, not {item!r}")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
+def apply_sets(catalog, config, sets):
+    """Return (catalog, model config) with the --set values applied. Neither input is changed.
+    A key that does not exist in the file it belongs to is an error, so a typo cannot pass."""
+    config = json.loads(json.dumps(config))
+    changes = {}
+    for key, value in sets.items():
+        if key in CATALOG_KEYS:
+            if key == "date_schema" and value not in DATE_SCHEMAS:
+                raise ValueError(f"date_schema must be one of {list(DATE_SCHEMAS)}, not {value!r}")
+            if key == "vocabulary_in_prompts" and not isinstance(value, bool):
+                raise ValueError("vocabulary_in_prompts must be true or false")
+            changes[key] = value
+            continue
+        *path, leaf = key.split(".")
+        node = config
+        for part in path:
+            if not isinstance(node, dict) or part not in node:
+                raise ValueError(f"--set {key}: {part!r} is not in config/model.yaml")
+            node = node[part]
+        if not isinstance(node, dict) or (leaf not in node and not (path and path[0] == "tasks")):
+            raise ValueError(f"--set {key}: not a key of config/model.yaml")
+        if value is None:
+            node.pop(leaf, None)
+        else:
+            node[leaf] = value
+    return dataclasses.replace(catalog, **changes), config
+
+
+def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1, sets=None, fresh=True):
+    catalog, config = apply_sets(load(), yaml.safe_load(MODEL_CONFIG.read_text()), sets or {})
+    if model_kind == "gemini":
+        model = GeminiModel(config=config)
+    elif set(sets or {}) <= set(CATALOG_KEYS):
+        model = KeywordModel(catalog)
+    else:
+        raise ValueError("--set of a model.yaml key needs --model gemini")
     audit_path = out_dir / f"audit-{label}-{stamp}.jsonl"
-    audit_path.unlink(missing_ok=True)
+    if fresh:
+        audit_path.unlink(missing_ok=True)
 
     def run_question(q):
         records = []
@@ -214,7 +272,7 @@ def run_set(questions, model_kind, runs, today, out_dir, label, stamp, workers=1
             # A graph and a recorder per request, so parallel requests keep separate records.
             recorder = Recorder(model)
             graph = build_graph(catalog, recorder, client=StubClient(1000),
-                                audit_path=audit_path, today=today, vocabulary=vocabulary)
+                                audit_path=audit_path, today=today)
             got = run_one(graph, recorder, q)
             passed, reason = score(q["expect"], got, catalog)
             got.update(id=q["id"], group=q["group"], question=q["question"], run=run,
@@ -345,8 +403,9 @@ def main():
     parser.add_argument("--label", help="names the output files (default: the model kind)")
     parser.add_argument("--workers", type=int, default=1,
                         help="questions to run at the same time (default 1)")
-    parser.add_argument("--vocabulary", choices=["on", "off"],
-                        help="put the Terms in the route and plan prompts (default: vocabulary_in_prompts)")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="sets",
+                        help="override one config value for this run (see the top of this file)")
+    parser.add_argument("--ids", help="only these question ids, comma separated")
     args = parser.parse_args()
     if args.runs < 1 or args.workers < 1:
         parser.error("--runs and --workers must be at least 1")
@@ -357,15 +416,27 @@ def main():
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     args.out.mkdir(parents=True, exist_ok=True)
 
-    name, records, audit_path = run_set(spec["questions"], args.model, args.runs, today, args.out,
-                                        label, stamp, args.workers,
-                                        {"on": True, "off": False}.get(args.vocabulary))
+    questions = spec["questions"]
+    if args.ids:
+        wanted = [i.strip() for i in args.ids.split(",")]
+        unknown = set(wanted) - {q["id"] for q in questions}
+        if unknown:
+            parser.error(f"unknown question ids: {sorted(unknown)}")
+        questions = [q for q in questions if q["id"] in wanted]
+    try:
+        sets = parse_sets(args.sets)
+        apply_sets(load(), yaml.safe_load(MODEL_CONFIG.read_text()), sets)   # fail before any call
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    name, records, audit_path = run_set(questions, args.model, args.runs, today, args.out,
+                                        label, stamp, args.workers, sets)
 
     base = args.out / f"{label}-{stamp}"
     base.with_suffix(".md").write_text(markdown(name, records, args.runs, today, stamp, label))
     per_question, per_group = tally(records)
     base.with_suffix(".json").write_text(json.dumps({
-        "model": name, "label": label, "workers": args.workers, "vocabulary": args.vocabulary, "date": stamp, "pinned_today": str(today), "runs": args.runs,
+        "model": name, "label": label, "workers": args.workers, "sets": sets, "date": stamp, "pinned_today": str(today), "runs": args.runs,
         "per_group": per_group,
         "per_question": {k: {**v, "reasons": dict(v["reasons"]), "got": dict(v["got"])}
                          for k, v in per_question.items()},

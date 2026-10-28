@@ -37,7 +37,7 @@ def prompt_for(model, title):
 
 def test_plan_prompt_has_todays_date_and_the_date_rule(make):
     model = ScriptedModel(route=[ANSWER], plan=[STATUS_PLAN])
-    make(model=model).ask("order status for last year")
+    make(model=model, date_schema="flat").ask("order status for last year")
     prompt = prompt_for(model, "plan")
     assert f"Today's date (UTC) is {TODAY.isoformat()}" in prompt
     assert "names no period, give neither start_date nor end_date" in prompt

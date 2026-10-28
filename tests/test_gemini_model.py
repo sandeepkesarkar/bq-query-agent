@@ -139,6 +139,20 @@ def test_client_is_built_with_one_retry_on_429_and_5xx(monkeypatch):
     assert options.retry_options.http_status_codes == [429, 500, 502, 503, 504]
 
 
+def test_a_task_can_set_its_own_timeout_and_attempts():
+    config = {**CONFIG, "tasks": {**CONFIG["tasks"], "plan": {**CONFIG["tasks"]["plan"],
+                                                              "request_timeout_seconds": 25,
+                                                              "retry_attempts": 3}}}
+    client = FakeClient(reply('{"function": "x", "params": {}}'), reply('{"route": "answer", "reason": "r"}'))
+    model = GeminiModel(config, client=client)
+    model.complete_structured("p", plan_schema(load()))
+    model.complete_structured("p", ROUTE_SCHEMA)
+    plan_options, route_options = (c["config"].http_options for c in client.calls)
+    assert plan_options.timeout == 25_000 and plan_options.retry_options.attempts == 3
+    assert plan_options.retry_options.http_status_codes == [429, 500, 502, 503, 504]
+    assert route_options is None            # the client's 60 s and 2 attempts apply
+
+
 def test_the_shipped_config_loads_and_has_generous_caps():
     model = GeminiModel(client=FakeClient())
     for spec in model.tasks.values():
@@ -146,7 +160,10 @@ def test_the_shipped_config_loads_and_has_generous_caps():
     assert model.max_token_retries == 3
     assert model.tasks["route"]["thinking_level"] == "low"
     assert model.tasks["summarize"]["thinking_level"] == "low"
-    assert "thinking_level" not in model.tasks["plan"] and "thinking_budget" not in model.tasks["plan"]
+    assert model.tasks["plan"]["thinking_level"] == "low"      # chosen by the date probe
+    assert (model.tasks["route"]["request_timeout_seconds"], model.tasks["plan"]["request_timeout_seconds"]) == (70, 80)
+    assert "request_timeout_seconds" not in model.tasks["summarize"]
+    assert model.config["retry_attempts"] == 3
     assert model.config["location"] == "global" and model.config["temperature"] == 0
     assert "key" not in json.dumps(model.config).lower()
 

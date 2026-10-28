@@ -44,12 +44,12 @@ class ScriptedModel:
 class Agent:
     """A graph with a stub client and its own audit file, plus helpers for one request."""
 
-    def __init__(self, catalog, tmp_path, estimate=1000, model=None, rows=None):
+    def __init__(self, catalog, tmp_path, estimate=1000, model=None, rows=None, date_schema=None):
         self.client = StubClient(estimate, rows)
         self.model = model or KeywordModel(catalog)
         self.audit_path = tmp_path / "audit.jsonl"
         self.graph = build_graph(catalog, self.model, client=self.client,
-                                 audit_path=self.audit_path, today=TODAY)
+                                 audit_path=self.audit_path, today=TODAY, date_schema=date_schema)
         self.config = {"configurable": {"thread_id": "test"}}
 
     def ask(self, question):

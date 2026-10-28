@@ -33,7 +33,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from agent import audit
-from agent.models import ROUTE_SCHEMA, SUMMARY_SCHEMA, escape_text, plan_schema
+from agent.models import ROUTE_SCHEMA, SUMMARY_SCHEMA, escape_text, flatten_plan, plan_schema
 from agent.summary_check import fallback_summary, unmatched_numbers
 from functions.queries import (
     BilledLimitError, OverCapError, ValidationError, estimate, execute, prepare,
@@ -63,6 +63,7 @@ class State(TypedDict, total=False):
     error: str
     message: str                 # what is shown to the person at the end
     summary_fallback: bool       # True if the model's summary was replaced by one built by code
+    raw_plan: dict               # the plan as the model wrote it, before flatten_plan (date_schema period)
     model_attempts: dict         # per step (route, plan, summarize): the attempts each model call took
 
 
@@ -70,13 +71,19 @@ def _first_sentence(text):
     return text.split(". ")[0].rstrip(".") + "."
 
 
-def _menu(catalog):
+def _menu(catalog, date_schema="flat"):
     """The function menu, as text for the plan prompt."""
     lines = []
     for fn in catalog.functions.values():
         lines.append(f"- {fn.name}: {fn.description}")
         lines.append(f"  Not for: {fn.not_for}")
+        period = date_schema == "period" and {"start_date", "end_date"} <= set(fn.params)
         for p in fn.params.values():
+            if period and p.name == "start_date":
+                lines.append("  period: null, or {start_date, end_date}, both YYYY-MM-DD. "
+                             "null when the question names no period (the default window applies)")
+            if period and p.name in ("start_date", "end_date"):
+                continue
             if p.type == "enum":
                 allowed = ", ".join(p.values)
                 rule = f"one of [{allowed}]" + (" or omit" if p.optional else f", default {p.default}")
@@ -137,13 +144,14 @@ def _date_pair_errors(catalog, function, params):
 
 
 def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_PATH,
-                checkpointer=None, today=None, vocabulary=None):
+                checkpointer=None, today=None, vocabulary=None, date_schema=None):
     """Build and compile the graph. `client` defaults to a real BigQuery client. `vocabulary`
-    (True or False) overrides the catalog's vocabulary_in_prompts."""
+    (True or False) overrides the catalog's vocabulary_in_prompts, and `date_schema` its date_schema."""
 
     terms = _terms(catalog, catalog.vocabulary_in_prompts if vocabulary is None else vocabulary)
 
-    plan_schema_ = plan_schema(catalog)
+    date_schema = date_schema or catalog.date_schema
+    plan_schema_ = plan_schema(catalog, date_schema)
 
     def today_utc():
         return today or datetime.now(timezone.utc).date()
@@ -202,39 +210,56 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
 
     def plan(state: State) -> dict[str, Any]:
         errors = state.get("validation_errors") or []
+        if date_schema == "period":
+            dates = ("period is null when the question names no period; otherwise give both "
+                     "dates in it, counted from today's date.\n")
+            omit = "period"
+        else:
+            dates = ("if the question names no period, give neither start_date nor end_date. If "
+                     "it names a period, explicitly or like \"last year\", \"last quarter\" or "
+                     "\"September\", give both, counted from today's date.\n")
+            omit = "the dates"
         prompt = (
             "Choose one function from the menu and fill in its parameters. Omit a parameter "
-            "other than the dates to use its default. Use only names and values from the menu.\n"
-            f"Today's date (UTC) is {today_utc().isoformat()}. Dates: if the question names no "
-            "period, give neither start_date nor end_date. If it names a period, explicitly or "
-            "like \"last year\", \"last quarter\" or \"September\", give both, counted from "
-            "today's date.\n"
+            f"other than {omit} to use its default. Use only names and values from the menu.\n"
+            f"Today's date (UTC) is {today_utc().isoformat()}. Dates: " + dates +
             f"{terms}"
-            f"<menu>\n{_menu(catalog)}\n</menu>\n"
+            f"<menu>\n{_menu(catalog, date_schema)}\n</menu>\n"
             f"<question>\n{escape_text(state['question'])}\n</question>"
         )
         if errors:
             prompt += (
                 "\nYour previous plan was rejected. Fix these problems:\n"
-                f"<previous_plan>\n{json.dumps(state.get('plan'), default=str)}\n</previous_plan>\n"
+                f"<previous_plan>\n{json.dumps(state.get('raw_plan') or state.get('plan'), default=str)}\n</previous_plan>\n"
                 "<errors>\n" + "\n".join(errors) + "\n</errors>"
             )
         attempts = state.get("attempts", 0) + 1
         try:
             out = model.complete_structured(prompt, plan_schema_)
         except Exception as exc:
-            return {"attempts": attempts, "plan": None, "validation_errors": [f"plan: {exc}"],
+            return {"attempts": attempts, "plan": None, "raw_plan": None,
+                    "validation_errors": [f"plan: {exc}"],
                     "model_attempts": attempts_after(state, "plan")}
-        return {"attempts": attempts, "plan": out, "model_attempts": attempts_after(state, "plan")}
+        return {"attempts": attempts, "plan": flatten_plan(out), "raw_plan": out,
+                "model_attempts": attempts_after(state, "plan")}
 
     def validate(state: State) -> dict[str, Any]:
-        errors = _plan_valid(catalog, state.get("plan"), today)
+        if state.get("plan") is None and state.get("validation_errors"):
+            # The plan call itself failed (a ModelError, a timeout). Keep its error: checking
+            # a missing plan would replace it with "the plan is not an object".
+            errors, failed = state["validation_errors"], True
+        else:
+            errors, failed = _plan_valid(catalog, state.get("plan"), today), False
         if not errors:
             return {"validation_errors": []}
         update = {"validation_errors": errors}
         if state.get("attempts", 0) >= MAX_PLANS:
-            update.update(status="rejected", error="; ".join(errors),
-                          message="The request was not allowed: " + "; ".join(errors))
+            if failed:
+                update.update(status="error", error="; ".join(errors),
+                              message="The request could not be planned: " + "; ".join(errors))
+            else:
+                update.update(status="rejected", error="; ".join(errors),
+                              message="The request was not allowed: " + "; ".join(errors))
         return update
 
     def cost_check(state: State) -> dict[str, Any]:

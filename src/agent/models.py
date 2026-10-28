@@ -40,7 +40,10 @@ def _param_schema(name, param, existing):
     return schema
 
 
-def plan_schema(catalog):
+DATES = ("start_date", "end_date")
+
+
+def plan_schema(catalog, date_schema=None):
     """The plan schema, built from the catalog.
 
     `function` is an enum of the function names. `params` lists every parameter name any
@@ -48,21 +51,61 @@ def plan_schema(catalog):
     functions that use it. The schema only narrows what a model writes; the checks in the
     validate node are still the real guard, because they know which parameters belong to
     which function.
+
+    With date_schema "period" (default: the catalog's), start_date and end_date are replaced
+    by one required `period`, which is null or an object with both dates required. A lone
+    date then cannot be written. flatten_plan() turns the reply back into start_date and
+    end_date.
     """
+    date_schema = date_schema or catalog.date_schema
     properties = {}
     for fn in catalog.functions.values():
         for name, param in fn.params.items():
             properties[name] = _param_schema(name, param, properties.get(name))
+    params = {"type": "object", "properties": properties, "additionalProperties": False}
+    if date_schema == "period" and all(d in properties for d in DATES):
+        date = properties.pop("start_date")
+        properties.pop("end_date")
+        properties["period"] = {
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"start_date": date, "end_date": dict(date)},
+                 "required": list(DATES), "additionalProperties": False},
+            ],
+        }
+        params["required"] = ["period"]
     return {
         "title": "plan",
         "type": "object",
         "properties": {
             "function": {"type": "string", "enum": list(catalog.functions)},
-            "params": {"type": "object", "properties": properties, "additionalProperties": False},
+            "params": params,
         },
         "required": ["function", "params"],
         "additionalProperties": False,
     }
+
+
+def flatten_plan(plan):
+    """Turn a plan written to the "period" schema back into start_date and end_date.
+
+    period null gives no dates; an object gives the dates it has. A plan without a `period`
+    key is returned as it is, and so is a plan whose period is neither null nor an object (it
+    keeps the key, so the validate node rejects it as an unknown parameter).
+    """
+    if not isinstance(plan, dict) or not isinstance(plan.get("params"), dict):
+        return plan
+    params = plan["params"]
+    if "period" not in params:
+        return plan
+    period = params["period"]
+    if period is not None and not isinstance(period, dict):
+        return plan
+    flat = {k: v for k, v in params.items() if k != "period"}
+    for name in DATES:
+        if period and period.get(name) is not None:
+            flat[name] = period[name]
+    return {**plan, "params": flat}
 
 
 SUMMARY_SCHEMA = {

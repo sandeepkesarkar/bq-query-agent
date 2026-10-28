@@ -6,7 +6,8 @@
 The graph already treats an exception as a refusal at route, a rejected plan at plan and a
 plain fallback at summarize, so this class raises on anything it cannot trust: empty text, a
 finish reason other than STOP (a cut-off or a safety block), JSON that does not parse, or a
-result that is not an object. Retrying a 429 or 5xx once is left to the SDK's retry options.
+result that is not an object. Retrying a 429 or 5xx is left to the SDK's retry options; a task
+can set its own request_timeout_seconds and retry_attempts in model.yaml.
 
 A call that ends with MAX_TOKENS, and only that, is retried with the output cap doubled, up to
 the task's ceiling and at most `max_token_retries` times. The two retries are independent: the
@@ -88,6 +89,19 @@ class GeminiModel:
             **extra,
         )
 
+    def _task_http_options(self, spec):
+        """Per-request options for a task that sets its own request_timeout_seconds or
+        retry_attempts in model.yaml; None for a task that uses the client's."""
+        if "request_timeout_seconds" not in spec and "retry_attempts" not in spec:
+            return None
+        return types.HttpOptions(
+            timeout=int(spec.get("request_timeout_seconds", self.config["request_timeout_seconds"]) * 1000),
+            retry_options=types.HttpRetryOptions(
+                attempts=spec.get("retry_attempts", self.config["retry_attempts"]),
+                http_status_codes=RETRY_STATUS_CODES,
+            ),
+        )
+
     def _get_client(self):
         # Under a lock: two threads that each built a client would leave one to be garbage
         # collected, which closes it while another thread is still sending on it.
@@ -135,6 +149,7 @@ class GeminiModel:
                     temperature=self.config["temperature"],
                     max_output_tokens=cap,
                     thinking_config=self._thinking(spec),
+                    http_options=self._task_http_options(spec),
                 ),
             )
             self._count(response, call)

@@ -18,7 +18,7 @@ def catalog():
 
 @pytest.fixture(scope="module")
 def schema(catalog):
-    return plan_schema(catalog)
+    return plan_schema(catalog, "flat")   # the flat schema; test_period_schema.py has the period one
 
 
 def objects(node):

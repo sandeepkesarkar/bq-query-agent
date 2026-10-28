@@ -4,8 +4,17 @@
 provider: gemini
 location: global
 temperature: 0
-request_timeout_seconds: 60   # per attempt
-retry_attempts: 2             # for a 429 or 5xx, by the SDK; counts the first try, so one retry
+request_timeout_seconds: 60   # per attempt; a task can set its own (route and plan do)
+retry_attempts: 3             # for a timeout, 429 or 5xx, by the SDK; counts the first try, so two retries
+
+# Worst-case wait for a question whose model calls keep timing out (3 attempts each; the
+# summary step is left out, because a failed summary only falls back to a plain one):
+#   route never answers:   3 x 70 s = 210 s, and the request ends in an error.
+#   plan never answers:    the first plan and one re-plan, 2 x 3 x 80 s = 480 s, after a route
+#                          call that itself timed out twice (2 x 70 s) and then answered:
+#                          about 620 s, a little over 10 minutes, plus a few seconds of backoff.
+# The timeouts are about 3 x the p99 of single-attempt calls in the P4 probe (eval/results/
+# probe-dates.json): route 22.8 s, plan 25.9 s. Summarize was not measured and keeps 60 s.
 
 # Gemini 3.x thinking tokens count against max_output_tokens. A small cap returned an empty
 # reply with no error (LESSONS.md 17). A call that finishes with MAX_TOKENS (and only that) is
@@ -19,13 +28,16 @@ max_token_retries: 3
 tasks:
   route:
     model: gemini-3.8-flash
+    request_timeout_seconds: 70
     max_output_tokens: 2048
     max_output_tokens_ceiling: 8192
     thinking_level: low
   plan:
     model: gemini-3.8-flash
+    request_timeout_seconds: 80
     max_output_tokens: 2048
     max_output_tokens_ceiling: 8192
+    thinking_level: low
   summarize:
     model: gemini-3.8-flash
     max_output_tokens: 2048

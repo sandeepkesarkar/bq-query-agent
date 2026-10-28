@@ -41,6 +41,15 @@ limits:
   date_min: 2019-01-01             # before the first order; the data is regenerated (LESSONS.md 13)
   date_max: today_utc              # a date after today is rejected
 
+# How the plan schema asks the model for dates.
+#   flat:   separate start_date and end_date, each optional.
+# In the probe (eval/results/probe-dates.md) period removed the lone-date plans: 0 of 40 first
+# plans against 19 of 40 with flat.
+#   period: one required `period` that is null or an object with both dates, so a lone date
+#           cannot be written. The graph flattens it to start_date and end_date again before
+#           validation, so everything after the plan sees the same params in both modes.
+date_schema: period
+
 # Definitions of the period words a question may use. When vocabulary_in_prompts is true they
 # are listed under "Terms" in the route and plan prompts. The same rules, in code, are in
 # tests/resolve_period.py, which the tests use to check the expected dates in eval/questions.yaml.
