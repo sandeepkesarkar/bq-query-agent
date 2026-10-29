@@ -1,4 +1,4 @@
-# bq-query-agent: design (working draft)
+# bq-query-agent: design
 
 A small LangGraph agent that answers plain-English questions about a BigQuery dataset by choosing from a fixed set of parameterized query functions. The model proposes. Code decides. A human approves every query before it runs.
 
@@ -19,7 +19,7 @@ Tables used: orders, order_items, products, inventory_items, users. Known join p
 
 Everything dataset-specific lives in one config file: table names, allowed enum values, the function catalog below, and plain-language descriptions. The graph, guardrails and audit log must not import anything from it directly. That is what lets a second dataset (for example CMS Medicare charge data) drop in later.
 
-Monday task: in the BigQuery console, confirm every column and enum value used below with `SELECT DISTINCT` and a schema check. Do not trust this doc over the console.
+Every column and enum value used below was checked against the real tables with `SELECT DISTINCT` and a schema check (`sql/metrics_checks.sql`, results in `METRICS.md`). If this document and `METRICS.md` or the console disagree, they win.
 
 ## Function catalog
 
@@ -39,21 +39,23 @@ Week-one functions (6):
 
 Stretch (only if everything else is done): `inventory_aging(days_threshold)`, `profit_by_category(start_date, end_date)`.
 
-`status` values come from the console check on Monday. Do not hard-code from memory.
+`status` values come from the data check in `METRICS.md` (Shipped, Complete, Processing, Cancelled, Returned), not from memory.
 
 ## Graph
 
 State fields: question, route (answer | clarify | refuse), plan (function name and params), validation_errors, estimated_bytes, approved, result_rows, summary, audit_id.
 
-As built, the state also carries route_reason, attempts (plans made), result_columns, bytes_processed, bytes_billed, status (answered, clarify, refused, rejected, over_cap, declined, error), error and message (what the person is shown). The audit record needs these fields.
+The graph runs route, plan, validate, cost_check, approval, execute, summarize and audit. A request leaves early, straight to audit, when route says clarify or refuse, when validate rejects the plan twice, when the cost check fails or is over the cap, when the person declines, or when the query fails.
+
+As built, the state also carries route_reason, attempts (plans made), raw_plan (the plan as the model wrote it, before dates are flattened), model_attempts (per step), summary_fallback, result_columns, bytes_processed, bytes_billed, status (answered, clarify, refused, rejected, over_cap, declined, error), error and message (what the person is shown). The audit record needs these fields.
 
 Nodes:
 1. route (model): classify as answer, clarify or refuse. Out-of-scope and adversarial questions end here.
-2. plan (model): emit a JSON plan validated against a typed schema. Unknown function name means reject.
-3. validate (code): enum checks, bounds, date sanity. A plan must give both `start_date` and `end_date` or neither, because one end alone is valid but silently wrong (an omitted `end_date` runs to the latest data). One re-plan allowed, with the errors listed, then reject.
+2. plan (model): emit a JSON plan validated against a typed schema. Unknown function name means reject. With `date_schema: period` (the default) the plan carries one `period` (null, or both dates) and the node flattens it into `start_date` and `end_date`. If the model call itself fails, the plan is empty and the call's error is kept as the validation error.
+3. validate (code): enum checks, bounds, date sanity. A plan must give both `start_date` and `end_date` or neither, because one end alone is valid but silently wrong (an omitted `end_date` runs to the latest data). One re-plan allowed, with the errors listed. After that a bad plan ends the request with status `rejected`, and a plan call that failed ends it with status `error` and its own error text. With the `period` schema the lone-date rule can no longer fire on a model plan; it stays as the backstop.
 4. cost_check (code): BigQuery dry run. Compare bytes processed with the cap. Over the cap means stop, no approval offered.
 5. approval (code): `interrupt()` shows the function, params and estimated bytes. Resume with `Command(resume=...)`.
-6. execute (code): run the parameterized query as the read-only service account, with a maximum-bytes-billed limit as a second cap.
+6. execute (code): run the parameterized query with a maximum-bytes-billed limit as a second cap. The design calls for a read-only service account; it is not built, and the query runs as whoever is logged in to `gcloud`.
 7. summarize (model): write a short answer from the returned rows. Show the function and params used.
 8. audit (code): append a record for every run, including rejected and refused ones.
 
@@ -69,12 +71,12 @@ Checkpointer: in-memory for the demo. Production would need a durable one. Say s
 |---|---|
 | Function allowlist | validate |
 | Enum and bounds checks | validate |
-| Both ends of a date window, or neither | validate |
+| Both ends of a date window, or neither | the plan schema (`period`) and validate |
 | Parameterized queries only | execute |
 | Dry-run bytes cap before approval | cost_check |
 | Human approval | approval |
 | Maximum bytes billed on the job | execute |
-| Read-only service account | infra |
+| Read-only service account | infra (not built: queries run as the logged-in user) |
 | Aggregates-only results | function catalog |
 | Audit record for every run | audit |
 
@@ -96,32 +98,31 @@ Tested without cloud access: the adapter (fake client), the schema, the prompt, 
 
 ## Audit record
 
-JSON lines to start. Fields: timestamp, question, route, function, params, estimated_bytes, approved, bytes_billed, row_count, error, model_name, summary_fallback, attempts.
+JSON lines to start. Fields: timestamp, audit_id, question, route, status, function, params, estimated_bytes, approved, bytes_processed, bytes_billed, row_count, error, model_name, summary_fallback, attempts.
 
 ## Eval
 
-Write the questions by hand. Do not generate them.
+The questions are written by hand, not generated. `eval/questions.yaml` holds 24 of them: 12 plain (two per function), 4 with relative dates ("last quarter"), 4 that must be refused, 3 that need a follow-up and 1 with no dates, which must use the defaults. Relative dates are resolved against a pinned date (2026-10-28) so expected values do not go stale. Every window ends on or before 2026-09-30.
 
-Target 24 questions: 8 direct, 5 messy paraphrases, 3 ambiguous (expect clarify), 4 out-of-scope (expect refuse), 4 adversarial (injection attempts, requests for personal data, attempts to get raw SQL).
+Per question: id, group, text, and `expect` (route, and for an answer the function and the parameters it fixes). Scoring compares route, function and parameters; a parameter left out counts as its default. Nothing runs on BigQuery while scoring, because `tests/test_reference_match.py` already checks each function against its reference SQL, so a correct function with correct parameters is a correct answer. The earlier plan to compare answers against reference SQL results, and to report average bytes, was dropped for that reason. The run records tokens, seconds per request, re-plans, rejections and model errors.
 
-Per question: id, text, category, expected_route, expected_function, expected_params, reference_sql, pass rule.
+`scripts/run_eval.py` runs the set (`--runs N`, `--workers`, `--ids`, `--set KEY=VALUE`) and writes a report under `eval/results/`. Each question is asked three times because the model is not deterministic at temperature 0. `scripts/run_probe.py` compares settings round robin on chosen questions. A separate held-out set of 24 questions, written after the prompts were frozen, is run through the same scorer once and kept out of the repository. The numbers are in the README ("Evaluation") and `LESSONS.md` (19 to 21).
 
-Metrics: route accuracy, function match, exact parameter match, answer correctness against the reference SQL result, refusal accuracy, adversarial resistance, average bytes processed, latency.
-
-Make some questions hard enough that failures are expected. Report them.
+Some questions are hard enough that failures are expected. They are reported, not removed.
 
 ## Repo layout
 
 ```
 bq-query-agent/
-  README.md
-  DESIGN.md
+  README.md  DESIGN.md  METRICS.md  LESSONS.md
   config/{thelook.yaml, model.yaml}
   src/agent/{graph.py, models.py, gemini_model.py, summary_check.py, audit.py}   (the nodes live in graph.py)
-  src/functions/{catalog.py, queries.py}
+  src/functions/{catalog.py, queries.py, fake_client.py}
+  scripts/{ask.py, run_eval.py, run_probe.py, dry_run_queries.py, run_queries.py, vertex_smoke_test.py}
   tests/
-  eval/{questions.yaml, run_eval.py, results.md}
-  infra/   (Terraform, if time)
+  eval/{questions.yaml, results/}   (results are written by the scripts and not committed)
+  sql/{reference_queries.sql, metrics_checks.sql, results/}
+  infra/   (Terraform, not built)
 ```
 
 ## What may be claimed
