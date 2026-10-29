@@ -13,15 +13,21 @@ def _is_number(value):
     return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
 
 
-def _cell(value):
-    """The text of one cell: integers with thousands separators, floats and Decimals with two
-    decimals, dates as ISO text, None as empty, and anything longer than 40 characters cut."""
+def _is_id_column(name):
+    """A column named id or ending in _id holds identifiers, which are not quantities."""
+    return str(name) == "id" or str(name).endswith("_id")
+
+
+def _cell(value, plain=False):
+    """The text of one cell: integers with thousands separators (plain digits in an id
+    column), floats and Decimals with two decimals, dates as ISO text, None as empty, and
+    anything longer than 40 characters cut."""
     if value is None:
         text = ""
     elif isinstance(value, bool):
         text = str(value)
     elif isinstance(value, int):
-        text = f"{value:,}"
+        text = str(value) if plain else f"{value:,}"
     elif isinstance(value, (float, Decimal)):
         text = f"{value:,.2f}"
     elif isinstance(value, (date, datetime)):
@@ -38,7 +44,8 @@ def format_table(columns, rows, limit=10):
     A column is right-aligned when every non-empty value in the shown rows is a number.
     """
     shown = [list(r) for r in rows[:limit]]
-    cells = [[_cell(v) for v in row] for row in shown]
+    plain = [_is_id_column(c) for c in columns]
+    cells = [[_cell(v, plain[i]) for i, v in enumerate(row)] for row in shown]
     widths = [max([len(str(c))] + [len(row[i]) for row in cells]) for i, c in enumerate(columns)]
     right = [
         any(row[i] is not None for row in shown)

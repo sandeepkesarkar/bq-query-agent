@@ -61,3 +61,19 @@ def test_console_link_and_bq_show_command():
     assert console_link("my-proj", "US", "job_123") == (
         "https://console.cloud.google.com/bigquery?project=my-proj&j=bq:US:job_123&page=queryresults")
     assert bq_show_command("US", "job_123") == "bq show -j --location=US job_123"
+
+
+def test_id_columns_print_plain_digits():
+    out = format_table(["product_id", "id", "user_id", "units", "paid"],
+                       [(24899, 1234, 1000000, 24899, 1)]).splitlines()
+    assert out[2].split() == ["24899", "1234", "1000000", "24,899", "1"]
+
+
+def test_only_a_column_named_id_or_ending_in_id_is_plain():
+    out = format_table(["identity", "valid", "grid"], [(12345, 12345, 12345)]).splitlines()
+    assert out[2].split() == ["12,345", "12,345", "12,345"]
+
+
+def test_an_id_column_still_aligns_right_and_handles_none():
+    out = format_table(["order_id"], [(7,), (None,), (123456,)]).splitlines()
+    assert out[2:] == ["       7", "", "  123456"]  # right-aligned under the 8-wide header

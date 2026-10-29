@@ -26,7 +26,7 @@ This is a work in progress. The agent runs end to end, with a person approving e
 | Built and in this repo | Not built yet |
 |---|---|
 | Design of the whole agent (`DESIGN.md`) | More than one held-out run: the only one used 24 questions I wrote myself |
-| Metric definitions checked against the real data (`METRICS.md`) | |
+| Metric definitions checked against the real data (`METRICS.md`) | Required, nullable fields for every parameter, not only dates, so an omitted metric or category cannot fall back to a default silently |
 | Reference SQL for all six functions, run against BigQuery and checked | A read-only service account |
 | The dataset config: tables, limits and the query menu with each function's parameters and SQL | |
 | The six query functions as code (`src/functions/`): a loader that reads the config and fills its templates, and a runner that validates parameters, binds them as typed query parameters, dry-runs, refuses anything over 250 MiB and sets the same cap on the job | A durable checkpointer (state is kept in memory) |
@@ -259,38 +259,41 @@ uv run python scripts/ask.py "revenue by month for last year" --model gemini
 
 The demo routes and plans the question with a model (`--model stub`, the default, or `--model gemini`), validates the plan, and dry-runs it. It then shows the function, the parameters, the estimated bytes, the SQL that will run and the bound parameters (the values are never pasted into the SQL text), and asks `Run this query? [y/N]`. Only `y` runs the query. Then it prints the first rows (`--rows N`, default 10), the model's short summary with the function, parameters and bytes used, and the BigQuery job: its id, a link to it in the Cloud console, and a `bq show -j` command that prints the same job from a terminal. It appends one line to `audit.jsonl`, which includes the job id. A refused, rejected, over-cap or declined request prints no SQL and no rows. Use `--audit <path>` to write the log somewhere else. `--model gemini` sends a few small requests to Vertex AI, billed to your project.
 
-Sample run with `--model gemini` (SQL shortened to its first and last lines here; the demo prints all of it):
+Sample run with `--model gemini` (the SQL is shortened to its first and last lines here; the demo prints all of it, and the long summary sentence is left out):
 
 ```
 Function:  top_products
-Params:    {'n': 5, 'start_date': '2026-01-01', 'end_date': '2026-09-30'}
+Params:    {'category': 'Jeans', 'metric': 'profit', 'n': 5, 'start_date': '2026-01-01', 'end_date': '2026-09-30'}
 Estimate:  21,960,635 bytes (cap 262,144,000)
 
 SQL that will run (values are bound parameters, not pasted into the text):
 WITH d AS (
 ...
-ORDER BY revenue DESC, product_id
+ORDER BY profit DESC, product_id
 LIMIT @n
 
 Bound parameters:
-@category = NULL (STRING)
+@category = Jeans (STRING)
 @end_date = 2026-09-30 (DATE)
 @n = 5 (INT64)
 @start_date = 2026-01-01 (DATE)
 
 Run this query? [y/N]
 Rows
-product_id  product_name                              category            revenue  units    profit
-----------  ----------------------------------------  -----------------  --------  -----  --------
-    24,899  Nike Jordan Retro 11 Bred Bootie Socks    Socks              4,515.00      5  1,729.24
-    ...
+product_id  product_name                              category   revenue  units  profit
+----------  ----------------------------------------  --------  --------  -----  ------
+     20953  True Religion Men's Ricky Straight Vint…  Jeans     1,172.00      4  552.01
+     20631  True Religion Men's Bobby Zipper Jean     Jeans     1,144.00      4  546.83
+     21227  Diesel Men's Braddom Regular Carrot-Leg…  Jeans     1,050.00      3  537.60
+     21503  True Religion Men's Billy Super Big Jean  Jeans     1,035.00      3  493.70
+     21531  Diesel Men's Safado Slim Straight-Leg J…  Jeans       975.00      3  492.38
 
-BigQuery job: ff680616-f94b-4feb-a230-cb327139884e (US), processed 21,960,635 bytes, billed 41,943,040 bytes
-https://console.cloud.google.com/bigquery?project=bq-query-agent&j=bq:US:ff680616-f94b-4feb-a230-cb327139884e&page=queryresults
-bq show -j --location=US ff680616-f94b-4feb-a230-cb327139884e
+BigQuery job: 7868e405-ce5a-4b05-8e8a-a070c1a9f9d4 (US), processed 21,960,635 bytes, billed 41,943,040 bytes
+https://console.cloud.google.com/bigquery?project=bq-query-agent&j=bq:US:7868e405-ce5a-4b05-8e8a-a070c1a9f9d4&page=queryresults
+bq show -j --location=US 7868e405-ce5a-4b05-8e8a-a070c1a9f9d4
 ```
 
-This run also shows why the SQL is on screen: the model left out `metric: profit` and `category: Jeans`, so the query ranked all products by revenue. The person sees `@category = NULL` before approving, and the rows show it afterwards.
+This is the fifth try. The model does not always plan this question correctly: in 10 evaluation runs of it (q03), one left out `category`, and in 10 runs of the same words in lower case through `ask.py`, 4 did (plans only, declined at approval). Four of the five tries for this sample left out `category` too, and the first demo run left out `metric` and `category`. The approval screen shows it before anything runs (`@category = NULL`), and the rows show it afterwards. See `LESSONS.md`, lesson 22.
 
 The keyword stub matches words such as "top", "revenue", "return rate" and "traffic source", picks up a category, "by quarter", "top N" and ISO dates, and refuses questions that mention SQL, personal data or instructions. It exists to drive the graph and its tests. It is not a language model, and it misreads anything phrased differently.
 
