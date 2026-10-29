@@ -12,7 +12,7 @@ This project takes a different route. The AI never writes a query. Instead:
 
 1. A short menu of pre-written, reviewed query functions exists (for example "revenue by month" or "top products").
 2. The AI's only job is to choose one function from the menu and fill in the blanks (dates, a category, how many results).
-3. Ordinary code, not the AI, checks the choice, estimates what the query would cost, and shows a person exactly what is about to run.
+3. Ordinary code, not the AI, checks the choice, estimates what the query would cost, and shows a person exactly what is about to run: the SQL and the values bound to it.
 4. Only after a person approves does the query run, and every request is written to a log.
 
 The short version of the rule: the model proposes, code decides.
@@ -36,7 +36,7 @@ This is a work in progress. The agent runs end to end, with a person approving e
 | `scripts/run_probe.py`, which compares configurations round robin on chosen questions; and `vocabulary_in_prompts` (off), a list of period definitions that can be added to the prompts |  |
 | Prompt hardening: today's date in the plan prompt, the question escaped before it enters a prompt, a summary whose numbers are not in the rows replaced by a plain one |  |
 | An audit log: one JSON line per request in `audit.jsonl`, including refused, rejected, over-cap and declined ones. A failed write is reported on stderr and the answer is still returned |  |
-| A command-line demo (`scripts/ask.py`, `--model stub` or `--model gemini`) that asks for approval before running a query |  |
+| A command-line demo (`scripts/ask.py`, `--model stub` or `--model gemini`) that shows the SQL and its bound parameters, asks for approval, then prints the rows and the BigQuery job it ran |  |
 | Tests (`tests/`): config checks, validation, binding, both caps and every path through the graph with a stub BigQuery client; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries |  |
 | A script that runs queries under a 250 MiB per-query cap and writes a report |  |
 | Data-quality checks and their results (`sql/`) |  |
@@ -138,7 +138,7 @@ sequenceDiagram
                 G->>L: Record the refusal
                 G-->>P: Stopped. No approval is offered
             else Within the cap
-                G->>P: Pause (interrupt): function, parameters, estimated bytes
+                G->>P: Pause (interrupt): function, parameters, the SQL, the bound parameters, estimated bytes
                 Note over G: State is saved by the checkpointer. On resume the<br/>pausing step starts again from its top, so it has<br/>no side effects before the pause.
                 P-->>G: Resume with approve or decline
 
@@ -152,10 +152,10 @@ sequenceDiagram
                         G->>L: Record the error
                         G-->>P: Stopped. Nothing is retried
                     else Rows returned
-                        B-->>G: Rows, bytes processed, bytes billed
+                        B-->>G: Rows, job id, bytes processed, bytes billed
                         G->>M: Summarize the rows
                         M-->>G: Short answer (replaced by a plain one if a number is not in the rows)
-                        G->>L: Record function, parameters, estimated and billed bytes, row count, model
+                        G->>L: Record function, parameters, estimated and billed bytes, job id, row count, model
                         G-->>P: The answer, with the function and parameters used
                     end
                 end
@@ -257,7 +257,40 @@ uv run python scripts/ask.py "top 5 products by profit in Jeans from 2026-01-01 
 uv run python scripts/ask.py "revenue by month for last year" --model gemini
 ```
 
-The demo routes and plans the question with a model (`--model stub`, the default, or `--model gemini`), validates the plan, and dry-runs it. It then shows the function, the parameters and the estimated bytes, and asks `Run this query? [y/N]`. Only `y` runs the query. Then it prints a short answer with the function, parameters and bytes used, and appends one line to `audit.jsonl`. Use `--audit <path>` to write the log somewhere else. `--model gemini` sends a few small requests to Vertex AI, billed to your project.
+The demo routes and plans the question with a model (`--model stub`, the default, or `--model gemini`), validates the plan, and dry-runs it. It then shows the function, the parameters, the estimated bytes, the SQL that will run and the bound parameters (the values are never pasted into the SQL text), and asks `Run this query? [y/N]`. Only `y` runs the query. Then it prints the first rows (`--rows N`, default 10), the model's short summary with the function, parameters and bytes used, and the BigQuery job: its id, a link to it in the Cloud console, and a `bq show -j` command that prints the same job from a terminal. It appends one line to `audit.jsonl`, which includes the job id. A refused, rejected, over-cap or declined request prints no SQL and no rows. Use `--audit <path>` to write the log somewhere else. `--model gemini` sends a few small requests to Vertex AI, billed to your project.
+
+Sample run with `--model gemini` (SQL shortened to its first and last lines here; the demo prints all of it):
+
+```
+Function:  top_products
+Params:    {'n': 5, 'start_date': '2026-01-01', 'end_date': '2026-09-30'}
+Estimate:  21,960,635 bytes (cap 262,144,000)
+
+SQL that will run (values are bound parameters, not pasted into the text):
+WITH d AS (
+...
+ORDER BY revenue DESC, product_id
+LIMIT @n
+
+Bound parameters:
+@category = NULL (STRING)
+@end_date = 2026-09-30 (DATE)
+@n = 5 (INT64)
+@start_date = 2026-01-01 (DATE)
+
+Run this query? [y/N]
+Rows
+product_id  product_name                              category            revenue  units    profit
+----------  ----------------------------------------  -----------------  --------  -----  --------
+    24,899  Nike Jordan Retro 11 Bred Bootie Socks    Socks              4,515.00      5  1,729.24
+    ...
+
+BigQuery job: ff680616-f94b-4feb-a230-cb327139884e (US), processed 21,960,635 bytes, billed 41,943,040 bytes
+https://console.cloud.google.com/bigquery?project=bq-query-agent&j=bq:US:ff680616-f94b-4feb-a230-cb327139884e&page=queryresults
+bq show -j --location=US ff680616-f94b-4feb-a230-cb327139884e
+```
+
+This run also shows why the SQL is on screen: the model left out `metric: profit` and `category: Jeans`, so the query ranked all products by revenue. The person sees `@category = NULL` before approving, and the rows show it afterwards.
 
 The keyword stub matches words such as "top", "revenue", "return rate" and "traffic source", picks up a category, "by quarter", "top N" and ISO dates, and refuses questions that mention SQL, personal data or instructions. It exists to drive the graph and its tests. It is not a language model, and it misreads anything phrased differently.
 
@@ -398,6 +431,7 @@ bq-query-agent/
 │   │   ├── models.py          the model interface, the output schemas (the plan schema is built from the catalog), prompt escaping and the keyword stub
 │   │   ├── gemini_model.py    the same interface, answered by Gemini on Vertex AI
 │   │   ├── summary_check.py   checks that a summary's numbers appear in the rows, and builds the plain fallback
+│   │   ├── display.py         formats the rows, bound parameters and BigQuery job links for the demo
 │   │   └── audit.py           appends one JSON line per request to the audit log
 │   └── functions/
 │       ├── __init__.py        the public names: run, prepare, estimate, execute, load and the error types
@@ -412,6 +446,8 @@ bq-query-agent/
 │   ├── test_plan_schema.py    the plan schema built from the catalog (no cloud access)
 │   ├── test_hardening.py      today's date in the prompt, escaping, the summary check, a failed audit write (no cloud access)
 │   ├── test_gemini_integration.py  five questions against real Gemini, with a stub BigQuery client (integration)
+│   ├── test_display.py        the demo's table, parameter and link formatting (no cloud access)
+│   ├── test_audit.py          the audit line's fields, including job_id (no cloud access)
 │   ├── test_run_eval.py       the evaluation scorer and the run counting (no cloud access)
 │   ├── test_run_probe.py      the probe's counting, `--set` overrides and a round-robin run with the stub (no cloud access)
 │   ├── test_period_schema.py  the period date schema, flattening, and a plan call that fails (no cloud access)
@@ -449,12 +485,13 @@ What the files do, in more detail:
 | `src/agent/models.py` | The interface a model must meet, `complete_structured(prompt, schema)`, the route and summary schemas, `plan_schema(catalog, date_schema)` and `flatten_plan` (the `period` object back to two dates), `escape_text`, and the keyword stub. The graph checks whatever comes back: an unknown route counts as a refusal, and a plan goes through validation. |
 | `src/agent/gemini_model.py` | `GeminiModel`: calls Gemini on Vertex AI as set in `config/model.yaml`, raises on an empty, cut-off, blocked or malformed answer, and counts tokens. See "Connecting a real model". |
 | `src/agent/summary_check.py` | Finds numbers in a summary that are not in the rows, and builds the plain fallback summary. |
-| `src/agent/audit.py` | Writes one JSON line per request: time, an id, question, route, status, function, parameters, estimated, processed and billed bytes, approval, row count, error, model name, whether the summary fallback was used, and the attempts and token cap of each model step. |
+| `src/agent/display.py` | Text for the demo, as pure functions: the rows as an aligned table, the bound parameters, the console link and the `bq show` command. |
+| `src/agent/audit.py` | Writes one JSON line per request: time, an id, question, route, status, function, parameters, estimated, processed and billed bytes, the BigQuery job id, approval, row count, error, model name, whether the summary fallback was used, and the attempts and token cap of each model step. |
 | `config/model.yaml` | Which Gemini model each step uses, the location, temperature, per-task output caps and ceilings, thinking level, timeouts (route and plan have their own) and retry counts, with the worst-case wait. No keys. |
 | `scripts/run_probe.py` | Runs several configurations (name plus `--set KEY=VALUE`) on chosen questions, round robin, and writes `eval/results/probe-<label>.md` and `.json`: first-plan and final pass rates, lone dates, rejections, errors by kind, plan-call seconds and tokens. |
 | `scripts/ask.py` | The command-line demo described under "Asking the agent". |
 | `scripts/run_eval.py` | Sends each question in `eval/questions.yaml` through the graph (`--model stub` or `gemini`, `--runs N`, `--ids`, `--set KEY=VALUE` to override one config value for the run) with the date pinned to the file's date and a fake BigQuery client, declines every request at the approval step, scores route, function and parameters by the rules in the file's header, and writes a Markdown and a JSON report to `eval/results/`. Only the model calls cost anything. |
-| `tests/` | `test_catalog.py`, `test_queries.py`, `test_agent.py`, `test_gemini_model.py`, `test_plan_schema.py`, `test_period_schema.py`, `test_hardening.py`, `test_run_eval.py`, `test_run_probe.py` and `test_resolve_period.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. `test_gemini_integration.py` is also marked integration and is skipped without credentials. |
+| `tests/` | `test_catalog.py`, `test_queries.py`, `test_agent.py`, `test_gemini_model.py`, `test_plan_schema.py`, `test_period_schema.py`, `test_display.py`, `test_audit.py`, `test_hardening.py`, `test_run_eval.py`, `test_run_probe.py` and `test_resolve_period.py` need no cloud access. `test_agent.py` covers approve, decline, over the cap, a plan rejected after one re-plan, refuse and clarify, and checks the audit line for each. `test_reference_match.py` is marked integration and is skipped without credentials. It checks each function against its reference query, with default parameters and with set ones (the reference SQL edited to literal values), and runs real queries against a lowered cap to check that the dry-run refusal and `maximum_bytes_billed` both work. `test_gemini_integration.py` is also marked integration and is skipped without credentials. |
 | `scripts/dry_run_queries.py` | Reads the numbered queries in a SQL file and asks BigQuery for each one's estimated bytes without running it. With `--write` it records the estimate under each query. |
 | `scripts/run_queries.py` | Dry-runs each numbered query, refuses any over the cap, runs the rest, and writes a Markdown report with the rows plus the estimated, processed and billed bytes. With `--only 1,3` it runs a subset and writes a separate file. |
 | `scripts/vertex_smoke_test.py` | Sends two tiny real requests to a model (a plain message and a structured-output request with the same kind of schema the plan will use) and prints each result, with the likely cause of any failure. It tests Gemini on Vertex AI, using your Google login, and fails on an empty reply or a finish reason other than STOP. It exists because access and quota are decided outside the code (`LESSONS.md`, lesson 16). |

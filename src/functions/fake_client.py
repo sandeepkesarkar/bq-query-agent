@@ -20,6 +20,7 @@ class StubClient:
 
     def __init__(self, estimate, rows=None):
         self.estimate = estimate
+        self.project = "stub-project"
         self.rows = rows or StubRows()
         self.calls = []
 
@@ -36,4 +37,5 @@ class StubClient:
             total_bytes_processed=self.estimate,
             total_bytes_billed=BILLED,
             job_id="stub-job",
+            location=location,
         )

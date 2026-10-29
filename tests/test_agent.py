@@ -76,7 +76,9 @@ def test_approve_runs_the_query_and_audits_it(make):
     state = agent.ask("Top 5 products by profit in Jeans from 2026-01-01 to 2026-09-30")
 
     (pending,) = state["__interrupt__"]
-    assert pending.value == {
+    shown = dict(pending.value)
+    sql, parameters = shown.pop("sql"), shown.pop("parameters")
+    assert shown == {
         "question": "Top 5 products by profit in Jeans from 2026-01-01 to 2026-09-30",
         "function": "top_products",
         "params": {"metric": "profit", "n": 5, "category": "Jeans",
@@ -84,6 +86,9 @@ def test_approve_runs_the_query_and_audits_it(make):
         "estimated_bytes": 1000,
         "cap_bytes": CAP,
     }
+    assert "@category" in sql and "Jeans" not in sql
+    assert {"name": "category", "type": "STRING", "value": "Jeans"} in parameters
+    assert {"name": "start_date", "type": "DATE", "value": "2026-01-01"} in parameters
     # Waiting for approval: one dry run, nothing executed, nothing logged yet.
     assert len(agent.client.calls) == 1 and agent.client.executed == []
     assert agent.audit_lines() == []
@@ -103,6 +108,9 @@ def test_approve_runs_the_query_and_audits_it(make):
     assert line["approved"] is True
     assert (line["estimated_bytes"], line["bytes_processed"], line["bytes_billed"]) == (1000, 1000, BILLED)
     assert line["row_count"] == 2 and line["error"] is None
+    assert line["job_id"] == "stub-job" and state["job_id"] == "stub-job"
+    assert state["project"] == "stub-project" and state["location"] == "US"
+    assert state["sql"] == executed.sql
     assert line["model_name"] == "keyword-stub"
     assert line["audit_id"] == state["audit_id"] and line["timestamp"]
 
@@ -275,3 +283,52 @@ def test_question_text_never_reaches_the_sql(make):
     assert params["category"] == "Swim"  # chosen from the list, then bound
     for call in agent.client.calls:
         assert "Swim" not in call.sql and "');" not in call.sql
+
+
+# --- the SQL shown at approval is the SQL that runs ---
+
+QUESTIONS = {
+    "revenue_by_period": "revenue by quarter",
+    "top_products": "Top 5 products by profit in Jeans from 2026-01-01 to 2026-09-30",
+    "order_status_breakdown": "How many orders are in each status between 2026-07-01 and 2026-09-30?",
+    "average_order_value": "average order value by month",
+    "return_rate_by_category": "return rate by category",
+    "customers_by_traffic_source": "customers by traffic source",
+}
+
+
+def test_the_questions_cover_all_six_functions(catalog):
+    assert set(QUESTIONS) == set(catalog.functions)
+
+
+@pytest.mark.parametrize("function", sorted(QUESTIONS))
+def test_the_approval_payload_sql_is_the_sql_that_is_sent(catalog, make, function):
+    from functions.queries import prepare
+
+    agent = make()
+    state = agent.ask(QUESTIONS[function])
+    shown = state["__interrupt__"][0].value
+    assert shown["function"] == function
+    prepared = prepare(catalog, function, shown["params"], TODAY)
+    assert shown["sql"] == prepared.sql
+    assert shown["parameters"] == [
+        {"name": q.name, "type": q.type_, "value": "NULL" if q.value is None else str(q.value)}
+        for q in prepared.query_parameters
+    ]
+    agent.resume(True)
+    (executed,) = agent.client.executed
+    assert executed.sql == shown["sql"]
+
+
+def test_the_question_never_enters_the_sql(make):
+    agent = make()
+    text = "Top 5 products by profit in Jeans from 2026-01-01 to 2026-09-30"
+    shown = agent.ask(text)["__interrupt__"][0].value
+    assert text not in shown["sql"] and "Jeans" not in shown["sql"]
+
+
+def test_a_request_stopped_before_approval_has_no_job_id(make):
+    agent = make(estimate=CAP + 1)
+    agent.ask("revenue by quarter")
+    (line,) = agent.audit_lines()
+    assert line["job_id"] is None

@@ -54,7 +54,7 @@ Nodes:
 2. plan (model): emit a JSON plan validated against a typed schema. Unknown function name means reject. With `date_schema: period` (the default) the plan carries one `period` (null, or both dates) and the node flattens it into `start_date` and `end_date`. If the model call itself fails, the plan is empty and the call's error is kept as the validation error.
 3. validate (code): enum checks, bounds, date sanity. A plan must give both `start_date` and `end_date` or neither, because one end alone is valid but silently wrong (an omitted `end_date` runs to the latest data). One re-plan allowed, with the errors listed. After that a bad plan ends the request with status `rejected`, and a plan call that failed ends it with status `error` and its own error text. With the `period` schema the lone-date rule can no longer fire on a model plan; it stays as the backstop.
 4. cost_check (code): BigQuery dry run. Compare bytes processed with the cap. Over the cap means stop, no approval offered.
-5. approval (code): `interrupt()` shows the function, params and estimated bytes. Resume with `Command(resume=...)`.
+5. approval (code): `interrupt()` shows the function, params, estimated bytes, the SQL that will run (exactly the string sent to BigQuery) and the bound parameters as name, type and value. The question never appears in the SQL. Resume with `Command(resume=...)`.
 6. execute (code): run the parameterized query with a maximum-bytes-billed limit as a second cap. The design calls for a read-only service account; it is not built, and the query runs as whoever is logged in to `gcloud`.
 7. summarize (model): write a short answer from the returned rows. Show the function and params used.
 8. audit (code): append a record for every run, including rejected and refused ones.
@@ -98,7 +98,7 @@ Tested without cloud access: the adapter (fake client), the schema, the prompt, 
 
 ## Audit record
 
-JSON lines to start. Fields: timestamp, audit_id, question, route, status, function, params, estimated_bytes, approved, bytes_processed, bytes_billed, row_count, error, model_name, summary_fallback, attempts.
+JSON lines to start. Fields: timestamp, audit_id, question, route, status, function, params, estimated_bytes, approved, bytes_processed, bytes_billed, job_id, row_count, error, model_name, summary_fallback, attempts.
 
 ## Eval
 

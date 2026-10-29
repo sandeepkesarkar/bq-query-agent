@@ -87,6 +87,9 @@ class Result:
     estimated_bytes: int | None  # None if execute() was called without an estimate
     processed_bytes: int
     billed_bytes: int
+    job_id: str | None = None    # the BigQuery job, so the run can be found in the console
+    project: str | None = None   # the project the job ran in (client.project)
+    location: str | None = None  # the job's location, which `bq show -j` needs
 
 
 def _date_max(limits, today):
@@ -233,6 +236,9 @@ def execute(prepared, *, client=None, estimated_bytes=None):
         estimated_bytes=estimated_bytes,
         processed_bytes=job.total_bytes_processed,
         billed_bytes=job.total_bytes_billed,
+        job_id=job.job_id,
+        project=getattr(client, "project", None),
+        location=getattr(job, "location", None) or prepared.location,
     )
 
 

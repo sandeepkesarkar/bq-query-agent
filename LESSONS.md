@@ -127,6 +127,12 @@ Full evaluation on the new defaults (`after-fix2`, 24 questions, 3 runs, 2 worke
 
 Two things in the probe's own numbers. The call times of 60 s or more are a timed-out attempt (the limit was 60 s) followed by a quick retry, so the p99 of all "successful" calls is the timeout itself. The per-task timeouts in `config/model.yaml` are 3 times the p99 of the calls under 60 s (route 22.8 s, plan 25.9 s), and the retries are now 3 attempts. That is longer than the old 60 s for these two tasks, while the data suggest a hung call is usually fine on the retry; a shorter timeout might recover sooner. That was not tried.
 
+## 22. A demo that printed only the summary gave no sign that the data came from BigQuery
+
+`scripts/ask.py` printed the model's two-sentence summary and a footer. The SQL, the rows and the BigQuery job existed in the run and were never shown, so a viewer saw something that looked like a chatbot. The demo now prints the SQL and its bound parameters at approval, the first rows after the run, and the job id with a console link and a `bq show -j` command. The job id is also in the audit line. Run against the real job, `bq show` returned the same query text, the same bytes processed (21,960,635) and the same bytes billed (41,943,040) that the demo printed.
+
+The first real run also showed something the summary had hidden. For "top 5 products by profit in Jeans", Gemini's plan left out `metric` and `category`, so the query ranked all products by revenue. The summary said that no rows were Jeans, which was true of the rows but did not say the plan was wrong. The SQL and the `@category = NULL` line made the cause visible before the approval. This is one run, not a rate, and no prompt was changed for it.
+
 ## Still open
 
 - The cause of the order-volume ramp since October 14 is not established. A data-generator artifact is the likeliest guess, but nothing here tests that.

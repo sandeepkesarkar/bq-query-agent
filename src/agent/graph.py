@@ -59,6 +59,10 @@ class State(TypedDict, total=False):
     result_columns: list
     bytes_processed: int
     bytes_billed: int
+    sql: str                     # the SQL that was run, as sent to BigQuery
+    job_id: str                  # the BigQuery job that ran it
+    project: str
+    location: str
     status: str                  # answered, clarify, refused, rejected, over_cap, declined, error
     error: str
     message: str                 # what is shown to the person at the end
@@ -277,10 +281,15 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
     def approval(state: State) -> dict[str, Any]:
         # No side effects before interrupt(): this node runs again from the top on resume.
         p = state["plan"]
+        prepared = prepare(catalog, p["function"], p["params"], today)  # pure: no side effects
         decision = interrupt({
             "question": state["question"],
             "function": p["function"],
             "params": p["params"],
+            "sql": prepared.sql,
+            "parameters": [{"name": q.name, "type": q.type_,
+                             "value": "NULL" if q.value is None else str(q.value)}
+                            for q in prepared.query_parameters],
             "estimated_bytes": state["estimated_bytes"],
             "cap_bytes": catalog.limits["max_bytes_per_query"],
         })
@@ -306,6 +315,10 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
             "result_rows": [list(row) for row in result.rows],
             "bytes_processed": result.processed_bytes,
             "bytes_billed": result.billed_bytes,
+            "sql": prepared.sql,
+            "job_id": result.job_id,
+            "project": result.project,
+            "location": result.location,
         }
 
     def summarize(state: State) -> dict[str, Any]:
@@ -350,6 +363,7 @@ def build_graph(catalog, model, *, client=None, audit_path=audit.DEFAULT_AUDIT_P
             "approved": state.get("approved"),
             "bytes_processed": state.get("bytes_processed"),
             "bytes_billed": state.get("bytes_billed"),
+            "job_id": state.get("job_id"),
             "row_count": len(state["result_rows"]) if "result_rows" in state else None,
             "error": error,
             "model_name": getattr(model, "name", type(model).__name__),

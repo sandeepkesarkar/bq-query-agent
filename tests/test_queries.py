@@ -275,3 +275,11 @@ def test_estimate_refuses_over_the_cap_without_executing(catalog):
     with pytest.raises(OverCapError):
         estimate(prepare(catalog, "order_status_breakdown", {}, TODAY), client=client)
     assert len(client.calls) == 1
+
+
+# --- the job, so a run can be found in the console ---
+
+def test_execute_returns_the_job_id_project_and_location(catalog):
+    client = StubClient(1000)
+    result = execute(prepare(catalog, "revenue_by_period", {}, TODAY), client=client)
+    assert (result.job_id, result.project, result.location) == ("stub-job", "stub-project", "US")
