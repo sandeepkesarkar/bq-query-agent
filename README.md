@@ -37,7 +37,7 @@ This is a work in progress. The agent runs end to end, with a person approving e
 | Prompt hardening: today's date in the plan prompt, the question escaped before it enters a prompt, a summary whose numbers are not in the rows replaced by a plain one |  |
 | An audit log: one JSON line per request in `audit.jsonl`, including refused, rejected, over-cap and declined ones. A failed write is reported on stderr and the answer is still returned |  |
 | A command-line demo (`scripts/ask.py`, `--model stub` or `--model gemini`) that shows the SQL and its bound parameters, asks for approval, then prints the rows and the BigQuery job it ran |  |
-| Tests (`tests/`): config checks, validation, binding, both caps and every path through the graph with a stub BigQuery client; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries |  |
+| Tests (`tests/`): config checks, validation, binding, both caps, every path through the graph with a stub BigQuery client, the SQL shown at approval equal to the SQL sent, and the demo's table formatting; and BigQuery tests that each function returns what its reference query returns, with default and with set parameters, and that both caps stop real queries |  |
 | A script that runs queries under a 250 MiB per-query cap and writes a report |  |
 | Data-quality checks and their results (`sql/`) |  |
 | Notes on what went wrong and what was learned (`LESSONS.md`) |  |
@@ -156,7 +156,7 @@ sequenceDiagram
                         G->>M: Summarize the rows
                         M-->>G: Short answer (replaced by a plain one if a number is not in the rows)
                         G->>L: Record function, parameters, estimated and billed bytes, job id, row count, model
-                        G-->>P: The answer, with the function and parameters used
+                        G-->>P: The rows, the answer with the function and parameters used, and the BigQuery job (id, console link)
                     end
                 end
             end
@@ -191,7 +191,7 @@ What the Gemini adapter does:
 - **Prompts.** The route prompt carries today's date (UTC), the function names with a one-line description each, and the rules for answer, clarify and refuse. The plan prompt carries today's date and one date rule: no period named, `period` is null; a period named, both dates, counted from today's date (with `flat`: neither date, or both). A `vocabulary` in `config/thelook.yaml` can add "Terms" to the route and plan prompts; `vocabulary_in_prompts` is false because the test showed no gain (`LESSONS.md`, lesson 20). The question is escaped (`<`, `>` and `&`) before it enters any prompt, so text such as `</question>` cannot close the tag.
 - **The summary check.** After summarize, every number in the summary must appear in the returned rows, allowing thousands separators, rounding to the precision shown, a percent for a fraction, and the row count. If one does not, the summary is replaced by the row count and the first row, built by code, and the audit line has `summary_fallback: true`. A true figure the check does not recognise, such as "1.2 million", is replaced too.
 
-Tested so far: the adapter with a fake client, the plan schema, the prompt, the escaping, the summary check, the date-pair rule and the audit failure, all without cloud access. `tests/test_gemini_integration.py` has five tests that call real Gemini (seven requests in all: top products, a request for email addresses, "revenue by month for last year", an injection attempt and a vague question). All five passed on the last run, with a stub BigQuery client. What they showed:
+Tested so far: the adapter with a fake client, the plan schema, the prompt, the escaping, the summary check, the date-pair rule, the audit failure and the demo's formatting, all without cloud access. `tests/test_gemini_integration.py` has five tests that call real Gemini (seven requests in all: top products, a request for email addresses, "revenue by month for last year", an injection attempt and a vague question). All five passed on the last run, with a stub BigQuery client. What they showed:
 
 - With separate dates the real model often left out `end_date` (about half of the first plans for the date-heavy questions in the probe). The validate node rejects a window with only one end (lesson 18). With the `period` schema the probe saw no lone date in 40 first plans (lesson 21).
 - The route prompt now says that `reason` is shown to the person and must be a question for `clarify`. Without that, the model described the problem instead of asking.
@@ -221,6 +221,7 @@ Tested so far: the adapter with a fake client, the plan schema, the prompt, the 
 - **Dates are one `period` object by default.** The model had written a `start_date` without an `end_date` in about half of the first plans for date-heavy questions, which silently runs to the latest data. A prompt vocabulary of period definitions did not help (lone dates doubled) and is off. Requiring both dates or neither removed it (`LESSONS.md`, lessons 20 and 21).
 - **Plan thinking is `low`.** In the probe it matched the best accuracy with the shortest plan calls (lesson 21).
 - **Per-task timeouts** of 70 s (route) and 80 s (plan), 3 attempts, with the worst-case wait stated (see "Connecting a real model").
+- **The demo shows its evidence.** At approval it prints the exact SQL and the bound values; after the run it prints the rows and the BigQuery job id with a console link, so the answer can be traced to BigQuery and checked against the rows.
 - **A failed model call keeps its real error** in the request's status and audit line instead of being reported as an invalid plan.
 - **Questions are not edited to fit the agent.** The 24 evaluation questions are fixed; a separate held-out set is run once to check for overfitting.
 
